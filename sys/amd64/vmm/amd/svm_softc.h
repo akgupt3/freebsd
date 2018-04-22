@@ -47,6 +47,7 @@ struct svm_vcpu {
 	struct vmcb	vmcb;	 /* hardware saved vcpu context */
 	struct svm_regctx swctx; /* software saved vcpu context */
 	uint64_t	vmcb_pa; /* VMCB physical address */
+	uint64_t	apic_backing_pa; /* APIC physical address */
 	uint64_t	nextrip; /* next instruction to be executed by guest */
         int		lastcpu; /* host cpu that the vcpu last ran on */
 	uint32_t	dirty;	 /* state cache bits that must be cleared */
@@ -54,18 +55,27 @@ struct svm_vcpu {
 	struct asid	asid;
 } __aligned(PAGE_SIZE);
 
+/* Maximum number of vcpus per VM. */
+#define MAX_VCPUS_VM	512
 /*
  * SVM softc, one per virtual machine.
  */
 struct svm_softc {
-	uint8_t apic_page[VM_MAXCPU][PAGE_SIZE];
+	uint8_t *apic_page[VM_MAXCPU];
+        /* 
+	 * XXX: Do we need both - physical and logical - tables at same time
+	 * If this is host APIC mode(physical or logical) we need just one of these
+	 * tables but have different formats.
+	 */
+	// 1KB entries of 4 bytes each.	     /* Shared. */
+        uint32_t *logical_apic_tbl;
+	uint64_t *phy_apic_tbl; /* Shared. */
 	struct svm_vcpu vcpu[VM_MAXCPU];
-	vm_offset_t 	nptp;			    /* nested page table */
+	vm_offset_t 	nptp;	 	   /* nested page table */
 	uint8_t		*iopm_bitmap;    /* shared by all vcpus */
 	uint8_t		*msr_bitmap;    /* shared by all vcpus */
 	struct vm	*vm;
 };
-
 CTASSERT((offsetof(struct svm_softc, nptp) & PAGE_MASK) == 0);
 
 static __inline struct svm_vcpu *
