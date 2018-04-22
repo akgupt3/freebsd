@@ -95,6 +95,14 @@ SYSCTL_NODE(_hw_vmm, OID_AUTO, svm, CTLFLAG_RW, NULL, NULL);
 				VMCB_CACHE_SEG		|	\
 				VMCB_CACHE_NP)
 
+/*
+ * XXX: Shared by vmx and svm, move to common place.
+ * Use the last page below 4GB as the APIC access address. This address is
+ * occupied by the boot firmware so it is guaranteed that it will not conflict
+ * with a page in system memory.
+ */
+#define APIC_ACCESS_ADDRESS     0xFFFFF000
+
 static uint32_t vmcb_clean = VMCB_CACHE_DEFAULT;
 SYSCTL_INT(_hw_vmm_svm, OID_AUTO, vmcb_clean, CTLFLAG_RDTUN, &vmcb_clean,
     0, NULL);
@@ -115,6 +123,9 @@ static uint32_t nasid;
 SYSCTL_UINT(_hw_vmm_svm, OID_AUTO, num_asids, CTLFLAG_RDTUN, &nasid, 0,
     "Number of ASIDs supported by this processor");
 
+static int avic_enable;
+SYSCTL_INT(_hw_vmm_svm, OID_AUTO, avic_enable, CTLFLAG_RD,
+    &avic_enable, 0, NULL);
 /* Current ASID generation for each host cpu */
 static struct asid asid[MAXCPU];
 
@@ -141,6 +152,13 @@ decode_assist(void)
 {
 
 	return (svm_feature & AMD_CPUID_SVM_DECODE_ASSIST);
+}
+
+static __inline int
+avic_supported(void)
+{
+
+	return (svm_feature & AMD_CPUID_SVM_AVIC);
 }
 
 static void
@@ -524,6 +542,77 @@ vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
 	state->dr7 = DBREG_DR7_RESERVED1;
 }
 
+
+/*
+ * Initialize AVIC section of VMCB.
+ */
+static void
+vmcb_avic_init(struct vmcb_ctrl *ctrl, uint64_t apic_bar_val, uint64_t apic_backing_pa,
+    uint64_t apic_logical_pa, uint64_t apic_physical_pa)
+{
+	/* APIC bar. */
+	ctrl->avic_apic_bar = apic_bar_val;
+	ctrl->avic_apic_backing_page = apic_backing_pa;
+
+	ctrl->avic_logical_tbl = apic_logical_pa;
+	/* 
+	 * Note: Only for phssical table, we need to populate upper 40 bits of 52 address bits.
+	 */
+	ctrl->avic_physical_tbl = apic_physical_pa >> 12;
+
+
+	VCPU_CTR4(sc->vm, vcpu, "Init VMCB AVIC APIC BAR: 0x%lx backing: 0x%lx logical:0x%lx physical: 0x%lx",
+		apic_bar_val, apic_backing_pa, apic_logical_pa, apic_physical_pa);
+	/* Now enable AVIC for this VCPU. */
+	// XXX: Not now.
+	// ctrl->avic_enable = 1;
+}
+/*
+ * Initialize a virtual machine.
+ */
+static void
+svm_avic_init(struct svm_softc *svm_sc, struct vm* vm)
+{
+	struct svm_vcpu *vcpu;
+	struct vmcb_ctrl *ctrl;
+	vm_paddr_t apic_logical_pa, apic_physical_pa;
+	const vm_paddr_t apic_bar = DEFAULT_APIC_BASE;
+	int error, i;
+
+	/* 
+	 * Create mapping in NPT for local APIC access.
+	 * HPA (APIC_ACCCESS_ADDRESS) is never used, only read and write permission are checked.
+	 * XXX: Update NPT mapping for change in APIC BAR value.
+	 */
+ 	 error = vm_map_mmio(vm, apic_bar, PAGE_SIZE, APIC_ACCESS_ADDRESS);
+        /* XXX this should really return an error to the caller */
+        KASSERT(error == 0, ("vm_map_mmio(apicbase) error %d", error));
+
+	svm_sc->logical_apic_tbl = contigmalloc(PAGE_SIZE, M_SVM,
+	    M_WAITOK, 0, ~(vm_paddr_t)0, PAGE_SIZE, 0);
+	if (svm_sc->logical_apic_tbl == NULL)
+		panic("contigmalloc of logical APIC table failed");
+
+	apic_logical_pa = vtophys(svm_sc->logical_apic_tbl);
+
+	svm_sc->phy_apic_tbl = contigmalloc(PAGE_SIZE, M_SVM,
+	    M_WAITOK, 0, ~(vm_paddr_t)0, PAGE_SIZE, 0);
+	if (svm_sc->phy_apic_tbl == NULL)
+		panic("contigmalloc of physical APIC table failed");
+	apic_physical_pa = vtophys(svm_sc->phy_apic_tbl);
+
+	for (i = 0; i < VM_MAXCPU; i++) {
+		vcpu = svm_get_vcpu(svm_sc, i);
+		svm_sc->apic_page[i] = contigmalloc(PAGE_SIZE, M_SVM,
+	    		M_WAITOK, 0, ~(vm_paddr_t)0, PAGE_SIZE, 0);
+		vcpu->apic_backing_pa = vtophys(&svm_sc->apic_page[i]);
+		ctrl  = svm_get_vmcb_ctrl(svm_sc, i);
+		vmcb_avic_init(ctrl, apic_bar, vcpu->apic_backing_pa,
+			    	apic_logical_pa, apic_physical_pa);
+
+	}	
+}
+
 /*
  * Initialize a virtual machine.
  */
@@ -597,6 +686,19 @@ svm_vminit(struct vm *vm, pmap_t pmap)
 		vmcb_init(svm_sc, i, iopm_pa, msrpm_pa, pml4_pa);
 		svm_msr_guest_init(svm_sc, i);
 	}
+
+	if (avic_supported()) {
+		printf("SVM: AVIC is supported.\n");
+		avic_enable = 1;
+                TUNABLE_INT_FETCH("hw.vmm.svm.use_avic",
+                    &avic_enable);	
+	}
+	
+	if (avic_enable) {
+		printf("SVM: Enabling AVIC support.\n");
+		svm_avic_init(svm_sc, vm);
+	}
+
 	return (svm_sc);
 }
 

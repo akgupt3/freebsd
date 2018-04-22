@@ -256,7 +256,8 @@ struct vmcb_ctrl {
 	uint8_t v_ign_tpr:1;
 	uint8_t :3;
 	uint8_t	v_intr_masking:1; /* Guest and host sharing of RFLAGS. */
-	uint8_t	:7;
+	uint8_t	:6;
+	uint8_t avic_enable:1;	/* AVIC enable. */
 	uint8_t	v_intr_vector;	/* 0x64: Vector for virtual interrupt. */
 	uint8_t pad3[3];	/* 0x65-0x67 Reserved. */
 	uint64_t intr_shadow:1; /* 0x68: Interrupt shadow, section15.2.1 APM2 */
@@ -267,7 +268,8 @@ struct vmcb_ctrl {
 	uint64_t exitintinfo;	/* 0x88, Interrupt exit value. */
 	uint64_t np_enable:1;   /* 0x90, Nested paging enable. */
 	uint64_t :63;
-	uint8_t  pad4[0x10];	/* 0x98-0xA7 reserved. */
+	uint64_t avic_apic_bar; /* 0x98: AVIC APIC BAR */ 
+	uint64_t pad4;		/* 0x98-0xA7 reserved. */
 	uint64_t eventinj;	/* 0xA8, Event injection. */
 	uint64_t n_cr3;		/* B0, Nested page table. */
 	uint64_t lbr_virt_en:1;	/* Enable LBR virtualization. */
@@ -277,8 +279,19 @@ struct vmcb_ctrl {
 	uint64_t nrip;		/* 0xC8: Guest next nRIP. */
 	uint8_t	inst_len;	/* 0xD0: #NPF decode assist */
 	uint8_t	inst_bytes[15];
-	uint8_t	padd6[0x320];
+	uint64_t avic_apic_backing_page; /* 0xE0: APIC backing page. */
+	uint64_t pad5;
+	uint64_t avic_logical_tbl; /* 0xF0: APIC logical table. */
+	uint16_t :12;
+	/* NOTE: Only for physical table, we need to populate 40 bits. */
+	uint64_t avic_physical_tbl:40; /* 0xF8: APIC physical table. */
+	uint8_t :4;
+	uint8_t avic_physical_max_index;
+	uint8_t	padd6[0x300];
 } __attribute__ ((__packed__));
+CTASSERT(offsetof(struct vmcb_ctrl, exitintinfo) == 0x88);
+CTASSERT(offsetof(struct vmcb_ctrl, inst_len) == 0xD0);
+CTASSERT(offsetof(struct vmcb_ctrl, pad5) == 0xE8);
 CTASSERT(sizeof(struct vmcb_ctrl) == 1024);
 
 struct vmcb_state {
