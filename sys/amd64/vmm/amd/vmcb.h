@@ -154,6 +154,8 @@ struct svm_softc;
 #define	VMCB_EXIT_MONITOR		0x8A
 #define	VMCB_EXIT_MWAIT			0x8B
 #define	VMCB_EXIT_NPF			0x400
+#define	VMCB_EXIT_AVIC_INCOMP_IPI	0x401
+#define	VMCB_EXIT_AVIC_NOACCEL		0x402
 #define	VMCB_EXIT_INVALID		-1
 
 /*
@@ -348,6 +350,15 @@ struct vmcb {
 CTASSERT(sizeof(struct vmcb) == PAGE_SIZE);
 CTASSERT(offsetof(struct vmcb, state) == 0x400);
 
+/* AVIC physical table entry */
+struct avic_phys_ent {
+	uint8_t valid:1;
+	uint8_t isRunning:1;
+	uint16_t :10;
+	uint64_t apic_hpa:40;
+	uint8_t :4;
+	uint8_t host_apic_id;
+} __attribute__ ((__packed__));
 int	vmcb_read(struct svm_softc *sc, int vcpu, int ident, uint64_t *retval);
 int	vmcb_write(struct svm_softc *sc, int vcpu, int ident, uint64_t val);
 int	vmcb_setdesc(void *arg, int vcpu, int ident, struct seg_desc *desc);

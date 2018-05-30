@@ -547,68 +547,79 @@ vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
  * Initialize AVIC section of VMCB.
  */
 static void
-vmcb_avic_init(struct vmcb_ctrl *ctrl, uint64_t apic_bar_val, uint64_t apic_backing_pa,
+vmcb_avic_init(struct vmcb_ctrl *ctrl, int max_vcpu, uint64_t apic_gpa, uint64_t apic_hpa,
     uint64_t apic_logical_pa, uint64_t apic_physical_pa)
 {
 	/* APIC bar. */
-	ctrl->avic_apic_bar = apic_bar_val;
-	ctrl->avic_apic_backing_page = apic_backing_pa;
-
+	ctrl->avic_apic_bar = apic_gpa;
+	ctrl->avic_apic_backing_page = apic_hpa;
+	
+	ctrl->avic_physical_max_index = max_vcpu;
 	ctrl->avic_logical_tbl = apic_logical_pa;
 	/* 
 	 * Note: Only for phssical table, we need to populate upper 40 bits of 52 address bits.
+	 * XXX: check????
 	 */
 	ctrl->avic_physical_tbl = apic_physical_pa >> 12;
 
 
 	VCPU_CTR4(sc->vm, vcpu, "Init VMCB AVIC APIC BAR: 0x%lx backing: 0x%lx logical:0x%lx physical: 0x%lx",
-		apic_bar_val, apic_backing_pa, apic_logical_pa, apic_physical_pa);
+		apic_gpa, apic_hpa, apic_logical_pa, apic_physical_pa);
 	/* Now enable AVIC for this VCPU. */
 	// XXX: Not now.
 	// ctrl->avic_enable = 1;
 }
+
 /*
- * Initialize a virtual machine.
+ * Initialize VM for AVIC.
  */
 static void
-svm_avic_init(struct svm_softc *svm_sc, struct vm* vm)
+svm_avic_init(struct svm_softc *svm_sc, struct vm* vm, int max_vcpu)
 {
 	struct svm_vcpu *vcpu;
 	struct vmcb_ctrl *ctrl;
-	vm_paddr_t apic_logical_pa, apic_physical_pa;
-	const vm_paddr_t apic_bar = DEFAULT_APIC_BASE;
+	struct avic_phys_ent *phys_tbl;
+	vm_paddr_t apic_logical_tbl_pa, apic_physical_tbl_pa;
+	const vm_paddr_t apic_gpa = DEFAULT_APIC_BASE;
 	int error, i;
 
 	/* 
 	 * Create mapping in NPT for local APIC access.
-	 * HPA (APIC_ACCCESS_ADDRESS) is never used, only read and write permission are checked.
+	 * HPA (APIC_ACCCESS_ADDRESS) is never used, only to validate read and write permissions.
 	 * XXX: Update NPT mapping for change in APIC BAR value.
 	 */
- 	 error = vm_map_mmio(vm, apic_bar, PAGE_SIZE, APIC_ACCESS_ADDRESS);
+ 	 error = vm_map_mmio(vm, apic_gpa, PAGE_SIZE, APIC_ACCESS_ADDRESS);
         /* XXX this should really return an error to the caller */
         KASSERT(error == 0, ("vm_map_mmio(apicbase) error %d", error));
 
-	svm_sc->logical_apic_tbl = contigmalloc(PAGE_SIZE, M_SVM,
+	svm_sc->avic_logical_tbl = contigmalloc(PAGE_SIZE, M_SVM,
 	    M_WAITOK, 0, ~(vm_paddr_t)0, PAGE_SIZE, 0);
-	if (svm_sc->logical_apic_tbl == NULL)
+	if (svm_sc->avic_logical_tbl == NULL)
 		panic("contigmalloc of logical APIC table failed");
 
-	apic_logical_pa = vtophys(svm_sc->logical_apic_tbl);
+	apic_logical_tbl_pa = vtophys(svm_sc->avic_logical_tbl);
 
-	svm_sc->phy_apic_tbl = contigmalloc(PAGE_SIZE, M_SVM,
+	svm_sc->avic_phys = contigmalloc(PAGE_SIZE, M_SVM,
 	    M_WAITOK, 0, ~(vm_paddr_t)0, PAGE_SIZE, 0);
-	if (svm_sc->phy_apic_tbl == NULL)
+	if (svm_sc->avic_phys == NULL)
 		panic("contigmalloc of physical APIC table failed");
-	apic_physical_pa = vtophys(svm_sc->phy_apic_tbl);
+	phys_tbl = svm_sc->avic_phys;
+	apic_physical_tbl_pa = vtophys(phys_tbl);
 
-	for (i = 0; i < VM_MAXCPU; i++) {
+	for (i = 0; i < max_vcpu; i++) {
 		vcpu = svm_get_vcpu(svm_sc, i);
-		svm_sc->apic_page[i] = contigmalloc(PAGE_SIZE, M_SVM,
-	    		M_WAITOK, 0, ~(vm_paddr_t)0, PAGE_SIZE, 0);
-		vcpu->apic_backing_pa = vtophys(&svm_sc->apic_page[i]);
 		ctrl  = svm_get_vmcb_ctrl(svm_sc, i);
-		vmcb_avic_init(ctrl, apic_bar, vcpu->apic_backing_pa,
-			    	apic_logical_pa, apic_physical_pa);
+		vcpu->apic_hpa = vtophys(&svm_sc->apic_page[i]);
+		/* Only upper 40 bits of HPA. */
+		phys_tbl[i].apic_hpa = vcpu->apic_hpa >> 12;
+		phys_tbl[i].valid = 1;
+		/*
+		 * XXX: Changing vcpu APIC ID is not allowed.
+		 */
+		svm_sc->avic_logical_tbl[i] = 1 << 31 | i;
+		vmcb_avic_init(ctrl, max_vcpu, apic_gpa, vcpu->apic_hpa,
+				apic_logical_tbl_pa, apic_physical_tbl_pa);
+
 
 	}	
 }
@@ -688,15 +699,16 @@ svm_vminit(struct vm *vm, pmap_t pmap)
 	}
 
 	if (avic_supported()) {
-		printf("SVM: AVIC is supported.\n");
 		avic_enable = 1;
                 TUNABLE_INT_FETCH("hw.vmm.svm.use_avic",
                     &avic_enable);	
-	}
-	
-	if (avic_enable) {
-		printf("SVM: Enabling AVIC support.\n");
-		svm_avic_init(svm_sc, vm);
+		if (avic_enable) {
+			printf("SVM: Enabling AVIC support.\n");
+			svm_avic_init(svm_sc, vm, VM_MAXCPU);
+		} else {
+			printf("SVM: AVIC is supported but not enabled.\n");
+
+		}
 	}
 
 	return (svm_sc);
@@ -843,6 +855,94 @@ svm_paging_info(struct vmcb *vmcb, struct vm_guest_paging *paging)
 }
 
 #define	UNHANDLED 0
+
+/*
+ * Handle AVIC exits.
+ * EXITINFO2 is EOI vector.
+ */
+static int
+svm_handle_avic(struct svm_softc *svm_sc, int vcpu, uint64_t info1, uint64_t eoi_vector)
+{
+	bool write = false, trap = false;
+	bool read_vmexit = false; /* Expected exit for read. */
+	uint16_t offset;
+
+	KASSERT(avic_enable, ("AVIC is not enabled"));
+	write = info1 & BIT(32) ? true : false;
+	offset = info1 & 0xFFFF;
+
+	if (!write && ((offset != APIC_OFFSET_TIMER_CCR) && 
+			(offset != APIC_OFFSET_APR) &&
+			(offset <= APIC_OFFSET_TIMER_DCR)))
+		panic("AVIC read fault for offset 0x%x", offset);
+
+	/* Write access. */
+	switch(offset) {
+		/* For trap like. */
+		case APIC_OFFSET_ID: 
+		case APIC_OFFSET_RRR: 
+		case APIC_OFFSET_LDR: 
+		case APIC_OFFSET_DFR: 
+		case APIC_OFFSET_SVR: 
+		case APIC_OFFSET_ESR: 
+		case APIC_OFFSET_TIMER_LVT: 
+		case APIC_OFFSET_THERM_LVT: 
+		case APIC_OFFSET_PERF_LVT: 
+		case APIC_OFFSET_LINT0_LVT: 
+		case APIC_OFFSET_LINT1_LVT: 
+		case APIC_OFFSET_ERROR_LVT: 
+		case APIC_OFFSET_TIMER_ICR: 
+		case APIC_OFFSET_TIMER_DCR: 
+			trap = true;
+			break;
+		
+		/* For fault like. */
+		case APIC_OFFSET_VER: 
+		case APIC_OFFSET_PPR: 
+		case APIC_OFFSET_ISR0 ... APIC_OFFSET_ISR7: 
+		case APIC_OFFSET_TMR0 ... APIC_OFFSET_TMR7: 
+		case APIC_OFFSET_IRR0 ... APIC_OFFSET_IRR7: 
+			trap = false;
+			break;
+		
+		case APIC_OFFSET_TPR: 
+			panic("Write is accelerated for 0x%x\n", offset);
+			break;
+
+		case APIC_OFFSET_EOI:
+			/* Write accelertaed, #VMEXIT Only for level trigger. */
+			/* 
+			 * XXX: verify level trigger.
+			 * XXX: Handle EOI like VT-x.
+			 */
+			break;
+
+		case APIC_OFFSET_ICR_LOW:
+			/* Write accelertaed, #VMEXIT only for advanced. */
+			/* XXX: Handle advanced functions. */
+			break;
+
+		case APIC_OFFSET_ICR_HI:
+			panic("NO #VMEXIT for ICR_HI expected");
+			break;
+
+		case APIC_OFFSET_TIMER_CCR:
+			trap = false;
+			break;
+
+		/* XXX: 0x3FO/ APIC_OFFSET_SELF_IPI missing??? in spec */
+		case APIC_OFFSET_APR:
+		default: /* 0x400 - 0xFFF */
+			trap = false;
+			read_vmexit = true;
+			break;
+		
+	}
+
+	KASSERT(((write == false) && (read_exit = false)),
+		("op: %s, read exit expected: %s offset 0x%x", write ? "write" : "read",
+		 read_exit ? "true" : "false", offset));
+}
 
 /*
  * Handle guest I/O intercept.
@@ -1613,6 +1713,10 @@ svm_vmexit(struct svm_softc *svm_sc, int vcpu, struct vm_exit *vmexit)
 			    info2, info1, state->rip);
 		}
 		break;
+
+	case VMCB_EXIT_AVIC_FAULT:
+		svm_handle_avic(svm_sc->vm, vcpu, info1, info2);
+		break;
 	case VMCB_EXIT_MONITOR:
 		vmexit->exitcode = VM_EXITCODE_MONITOR;
 		break;
@@ -2053,6 +2157,41 @@ svm_dr_leave_guest(struct svm_regctx *gctx)
 	load_dr7(gctx->host_dr7);
 }
 
+/* 
+ * Setup AVIC related tables before launching guest. 
+ * NOTE: VCPU local APIC is already setup, this will allow hardware to accept interrupts
+ * on behalf of guest when the corresponding vcpu is not running.
+ */
+static void
+svm_avic_vcpu_enable(struct svm_softc *svm_sc, int vcpu)
+{
+	struct avic_phys_ent* ent;
+
+	ent = &svm_sc->avic_phys[vcpu];
+
+	KASSERT((ent->host_apic_id == -1), 
+		("AVIC Phys tbl[%d], pcpu :%d", vcpu, ent->host_apic_id));
+	ent->host_apic_id = cpu_apic_ids[curcpu];
+	KASSERT((ent->isRunning == 0), 
+		("AVIC Phys tbl[%d], is running", vcpu));
+	ent->isRunning = 1;
+}
+
+static void
+svm_avic_vcpu_disable(struct svm_softc *svm_sc, int vcpu)
+{
+	struct avic_phys_ent* ent;
+
+	ent = &svm_sc->avic_phys[vcpu];
+
+	KASSERT((ent->isRunning == 1), 
+		("AVIC Phys tbl[%d], is not running", vcpu));
+	ent->isRunning = 0;
+	KASSERT((ent->host_apic_id != -1), 
+		("AVIC Phys tbl[%d], pcpu :%d", vcpu, ent->host_apic_id));
+	ent->host_apic_id = -1;
+}
+
 /*
  * Start vcpu with specified RIP.
  */
@@ -2163,6 +2302,9 @@ svm_vmrun(void *arg, int vcpu, register_t rip, pmap_t pmap,
 		 * safe.
 		 */
 		ldt_sel = sldt();
+		/* Setup AVIC table. */
+		if (avic_enable)
+			svm_avic_vcpu_enable(svm_sc, vcpu);
 
 		svm_inj_interrupts(svm_sc, vcpu, vlapic);
 
@@ -2182,7 +2324,8 @@ svm_vmrun(void *arg, int vcpu, register_t rip, pmap_t pmap,
 		/* Launch Virtual Machine. */
 		VCPU_CTR1(vm, vcpu, "Resume execution at %#lx", state->rip);
 		svm_dr_enter_guest(gctx);
-		svm_launch(vmcb_pa, gctx, get_pcpu());
+		//svm_launch(vmcb_pa, gctx, get_pcpu());
+		svm_launch(vmcb_pa, gctx, &__pcpu[curcpu]);
 		svm_dr_leave_guest(gctx);
 
 		CPU_CLR_ATOMIC(curcpu, &pmap->pm_active);
@@ -2197,6 +2340,8 @@ svm_vmrun(void *arg, int vcpu, register_t rip, pmap_t pmap,
 		/* Restore host LDTR. */
 		lldt(ldt_sel);
 
+		if (avic_enable)
+			svm_avic_vcpu_disable(svm_sc, vcpu);
 		/* #VMEXIT disables interrupts so re-enable them here. */ 
 		enable_gintr();
 
@@ -2219,6 +2364,11 @@ svm_vmcleanup(void *arg)
 
 	contigfree(sc->iopm_bitmap, SVM_IO_BITMAP_SIZE, M_SVM);
 	contigfree(sc->msr_bitmap, SVM_MSR_BITMAP_SIZE, M_SVM);
+	
+	if (avic_enable) {
+		contigfree(sc->avic_logical_tbl, PAGE_SIZE, M_SVM);
+		contigfree(sc->avic_phys, PAGE_SIZE, M_SVM);
+	}
 	free(sc, M_SVM);
 }
 
