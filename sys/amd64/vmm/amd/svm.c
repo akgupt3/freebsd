@@ -612,6 +612,88 @@ svm_avic_init(struct svm_softc *svm_sc, struct vm* vm, int max_vcpu)
 	}	
 }
 
+
+/*
+ * Initialize AVIC section of VMCB.
+ */
+static void
+vmcb_avic_init(struct vmcb_ctrl *ctrl, int max_vcpu, uint64_t apic_gpa, uint64_t apic_hpa,
+    uint64_t apic_logical_pa, uint64_t apic_physical_pa)
+{
+	/* APIC bar. */
+	ctrl->avic_apic_bar = apic_gpa;
+	ctrl->avic_apic_backing_page = apic_hpa;
+	
+	ctrl->avic_physical_max_index = max_vcpu;
+	ctrl->avic_logical_tbl = apic_logical_pa;
+	/* 
+	 * Note: Only for phssical table, we need to populate upper 40 bits of 52 address bits.
+	 * XXX: check????
+	 */
+	ctrl->avic_physical_tbl = apic_physical_pa >> 12;
+
+
+	VCPU_CTR4(sc->vm, vcpu, "Init VMCB AVIC APIC BAR: 0x%lx backing: 0x%lx logical:0x%lx physical: 0x%lx",
+		apic_gpa, apic_hpa, apic_logical_pa, apic_physical_pa);
+	/* Now enable AVIC for this VCPU. */
+	// XXX: Not now.
+	// ctrl->avic_enable = 1;
+}
+
+/*
+ * Initialize VM for AVIC.
+ */
+static void
+svm_avic_init(struct svm_softc *svm_sc, struct vm* vm, int max_vcpu)
+{
+	struct svm_vcpu *vcpu;
+	struct vmcb_ctrl *ctrl;
+	struct avic_phys_ent *phys_tbl;
+	vm_paddr_t apic_logical_tbl_pa, apic_physical_tbl_pa;
+	const vm_paddr_t apic_gpa = DEFAULT_APIC_BASE;
+	int error, i;
+
+	/* 
+	 * Create mapping in NPT for local APIC access.
+	 * HPA (APIC_ACCCESS_ADDRESS) is never used, only to validate read and write permissions.
+	 * XXX: Update NPT mapping for change in APIC BAR value.
+	 */
+ 	 error = vm_map_mmio(vm, apic_gpa, PAGE_SIZE, APIC_ACCESS_ADDRESS);
+        /* XXX this should really return an error to the caller */
+        KASSERT(error == 0, ("vm_map_mmio(apicbase) error %d", error));
+
+	svm_sc->avic_logical_tbl = contigmalloc(PAGE_SIZE, M_SVM,
+	    M_WAITOK, 0, ~(vm_paddr_t)0, PAGE_SIZE, 0);
+	if (svm_sc->avic_logical_tbl == NULL)
+		panic("contigmalloc of logical APIC table failed");
+
+	apic_logical_tbl_pa = vtophys(svm_sc->avic_logical_tbl);
+
+	svm_sc->avic_phys = contigmalloc(PAGE_SIZE, M_SVM,
+	    M_WAITOK, 0, ~(vm_paddr_t)0, PAGE_SIZE, 0);
+	if (svm_sc->avic_phys == NULL)
+		panic("contigmalloc of physical APIC table failed");
+	phys_tbl = svm_sc->avic_phys;
+	apic_physical_tbl_pa = vtophys(phys_tbl);
+
+	for (i = 0; i < max_vcpu; i++) {
+		vcpu = svm_get_vcpu(svm_sc, i);
+		ctrl  = svm_get_vmcb_ctrl(svm_sc, i);
+		vcpu->apic_hpa = vtophys(&svm_sc->apic_page[i]);
+		/* Only upper 40 bits of HPA. */
+		phys_tbl[i].apic_hpa = vcpu->apic_hpa >> 12;
+		phys_tbl[i].valid = 1;
+		/*
+		 * XXX: Changing vcpu APIC ID is not allowed.
+		 */
+		svm_sc->avic_logical_tbl[i] = 1 << 31 | i;
+		vmcb_avic_init(ctrl, max_vcpu, apic_gpa, vcpu->apic_hpa,
+				apic_logical_tbl_pa, apic_physical_tbl_pa);
+
+
+	}	
+}
+
 /*
  * Initialize a virtual machine.
  */
