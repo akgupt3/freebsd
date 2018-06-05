@@ -266,6 +266,7 @@ svm_init(int ipinum)
 	/* Enable SVM on all CPUs */
 	smp_rendezvous(NULL, svm_enable, NULL, NULL);
 
+	printf("SVM: Enabling interrupt before global.....\n");
 	return (0);
 }
 
@@ -1989,21 +1990,26 @@ svm_vmrun(void *arg, int vcpu, register_t rip, pmap_t pmap,
 		 * maintained by the hypervisor: suspended and rendezvous
 		 * state, NPT generation number, vlapic interrupts etc.
 		 */
+		disable_intr();
 		disable_gintr();
+		enable_intr();
 
 		if (vcpu_suspended(evinfo)) {
+			disable_intr();
 			enable_gintr();
 			vm_exit_suspended(vm, vcpu, state->rip);
 			break;
 		}
 
 		if (vcpu_rendezvous_pending(evinfo)) {
+			disable_intr();
 			enable_gintr();
 			vm_exit_rendezvous(vm, vcpu, state->rip);
 			break;
 		}
 
 		if (vcpu_reqidle(evinfo)) {
+			disable_intr();
 			enable_gintr();
 			vm_exit_reqidle(vm, vcpu, state->rip);
 			break;
@@ -2011,12 +2017,14 @@ svm_vmrun(void *arg, int vcpu, register_t rip, pmap_t pmap,
 
 		/* We are asked to give the cpu by scheduler. */
 		if (vcpu_should_yield(vm, vcpu)) {
+			disable_intr();
 			enable_gintr();
 			vm_exit_astpending(vm, vcpu, state->rip);
 			break;
 		}
 
 		if (vcpu_debugged(vm, vcpu)) {
+			disable_intr();
 			enable_gintr();
 			vm_exit_debug(vm, vcpu, state->rip);
 			break;
@@ -2053,6 +2061,7 @@ svm_vmrun(void *arg, int vcpu, register_t rip, pmap_t pmap,
 		restore_host_tss();
 
 		/* #VMEXIT disables interrupts so re-enable them here. */ 
+		disable_intr();
 		enable_gintr();
 
 		/* Update 'nextrip' */
