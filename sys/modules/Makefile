@@ -165,6 +165,7 @@ SUBDIR=	\
 	${_intelspi} \
 	${_io} \
 	${_ioat} \
+	${_ionic} \
         ${_ipoib} \
 	${_ipdivert} \
 	${_ipfilter} \
@@ -691,6 +692,7 @@ _ccp=		ccp
 _efirt=		efirt
 _iavf=		iavf
 _ioat=		ioat
+_ionic=		ionic
 _ixl=		ixl
 _linux64=	linux64
 _linux_common=	linux_common
