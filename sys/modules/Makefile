@@ -174,6 +174,7 @@ SUBDIR=	\
 	${_intelspi} \
 	${_io} \
 	${_ioat} \
+	${_ionic} \
         ${_ipoib} \
 	${_ipdivert} \
 	${_ipfilter} \
@@ -725,6 +726,7 @@ _x86bios=	x86bios
 _amdgpio=	amdgpio
 _efirt=		efirt
 _ioat=		ioat
+_ionic=		ionic
 _ixl=		ixl
 _ixlv=		ixlv
 _linux64=	linux64
