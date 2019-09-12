@@ -773,7 +773,11 @@ ionic_set_multi(struct lif *lif)
 		return EIO;
 
 	if_maddr_rlock(ifp);
+#if __FreeBSD_version >= 1200000
+	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+#else
 	TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+#endif
 		if (ifma->ifma_addr->sa_family != AF_LINK)
 			continue;
 		bcopy(LLADDR((struct sockaddr_dl *) ifma->ifma_addr),
@@ -786,7 +790,11 @@ ionic_set_multi(struct lif *lif)
 	num_new_mc_addrs = 0;
 
 	/* Find the new address we need to add. */
+#if __FreeBSD_version >= 1200000
+	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+#else
 	TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+#endif
 		if (ifma->ifma_addr->sa_family != AF_LINK)
 			continue;
 		bcopy(LLADDR((struct sockaddr_dl *) ifma->ifma_addr),
