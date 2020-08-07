@@ -35,6 +35,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/systm.h>
 #include <sys/malloc.h>
+#include <sys/sysctl.h>
+#include <sys/lock.h>
+#include <sys/mutex.h>
+#include <sys/bus.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -44,6 +48,10 @@ __FBSDID("$FreeBSD$");
 #include <machine/vmparam.h>
 #include <contrib/dev/acpica/include/acpi.h>
 
+#include <machine/intr_machdep.h>
+#include <machine/vmm.h>
+
+#include "vmm_lapic.h"
 #include "io/iommu.h"
 
 /*
@@ -63,26 +71,62 @@ struct vtdmap {
 	volatile uint32_t	gsr;
 	volatile uint64_t	rta;
 	volatile uint64_t	ccr;
-};
+	volatile uint32_t	:32;/* Reserved 0x30-0x33 */
+	volatile uint32_t	fsr;
+	volatile uint32_t	fcr;
+	volatile uint32_t	fdr;
+	volatile uint32_t	far;
+	volatile uint32_t	fuar;
+ 
+	uint8_t			pad[0x70];
+	volatile uint64_t	iata;	/* Offset 0xB8 */
+} __attribute__ ((__packed__));
 
+CTASSERT(offsetof(struct vtdmap, fsr) == 0x34);
+CTASSERT(offsetof(struct vtdmap, iata) == 0xB8);
+
+/*
+ * Section 10.4 "Register Descriptions"
+ * VT-d capability.
+ */
 #define	VTD_CAP_SAGAW(cap)	(((cap) >> 8) & 0x1F)
 #define	VTD_CAP_ND(cap)		((cap) & 0x7)
 #define	VTD_CAP_CM(cap)		(((cap) >> 7) & 0x1)
 #define	VTD_CAP_SPS(cap)	(((cap) >> 34) & 0xF)
 #define	VTD_CAP_RWBF(cap)	(((cap) >> 4) & 0x1)
+#define	VTD_CAP_PI(cap)		(((cap) >> 59) & 0x1)
+#define	VTD_CAP_NFR(cap)	(((cap) >> 40) & 0xFF)
+#define	VTD_CAP_FRO(cap)	((((cap) >> 24) & 0x3FF) * 16)
 
+/* VT-d extended capability. */
 #define	VTD_ECAP_DI(ecap)	(((ecap) >> 2) & 0x1)
 #define	VTD_ECAP_COHERENCY(ecap) ((ecap) & 0x1)
 #define	VTD_ECAP_IRO(ecap)	(((ecap) >> 8) & 0x3FF)
+#define	VTD_ECAP_IR(ecap)	(((ecap) >> 3) & 0x1)
 
+/* VT-d command register. */
+#define	VTD_GCR_CFI		(1 << 23)
+#define	VTD_GCR_SIRTP		(1 << 24)
+#define	VTD_GCR_IRE		(1 << 25)
 #define	VTD_GCR_WBF		(1 << 27)
 #define	VTD_GCR_SRTP		(1 << 30)
 #define	VTD_GCR_TE		(1U << 31)
 
+/* VT-d global register. */
+#define	VTD_GSR_CFIS		(1 << 23)
+#define	VTD_GSR_IRTPS		(1 << 24)
+#define	VTD_GSR_IRES		(1 << 25) /* IR is enabled. */
 #define	VTD_GSR_WBFS		(1 << 27)
 #define	VTD_GSR_RTPS		(1 << 30)
 #define	VTD_GSR_TES		(1U << 31)
 
+#define VTD_GSR_IR_ENABLED(gsr)			\
+	(((gsr) & (VTD_GSR_IRTPS | VTD_GSR_IRES)) == (VTD_GSR_IRTPS | VTD_GSR_IRES))
+
+/* VT-d fault status register. */
+#define VTD_FSR_INDEX(fsr)	((fsr >> 8) & 0xFF)
+
+/* VT-d context command register. */
 #define	VTD_CCR_ICC		(1UL << 63)	/* invalidate context cache */
 #define	VTD_CCR_CIRG_GLOBAL	(1UL << 61)	/* global invalidation */
 
@@ -127,7 +171,102 @@ typedef int			(*drhd_ident_func_t)(void);
 static uint64_t root_table[PAGE_SIZE / sizeof(uint64_t)] __aligned(4096);
 static uint64_t ctx_tables[256][PAGE_SIZE / sizeof(uint64_t)] __aligned(4096);
 
+/* Maximum number of IR entries, can go upto 2 ^ 16. */
+#define	IR_MAX_ENTRIES_POWER2	12
+#define IR_MAX_ENTRIES		(1 << IR_MAX_ENTRIES_POWER2)
+
+/*
+ * See section 9.10 and 9.11 of VT-d spec, all IRTE are of
+ * 128 bit long.
+ */
+static struct irte {
+	uint64_t lsb;
+	uint64_t msb;
+} intr_remap_tbl[IR_MAX_ENTRIES] __aligned(4096);
+
+/* Interrupt Remap common definitions. */
+#define IRE_IR_PRESENT		1
+#define IRE_IR_FPD		0x2
+#define	IRE_VECTOR(vec)		(((vec) & 0xFF) << 16)
+
+/* IRTE for Remapped Interrupts, see section 9.10 of Intel VT-d spec. */
+#define IRE_IR_DM_LOGICAL	0x4
+#define IRE_IR_RH		0x8
+#define IRE_IR_TM_LEVEL		0x10
+#define	IRE_IR_DST_xAPIC(d)	(((uint64_t)(d) & 0xFF) << 40)
+
+/* IRTE for Posted Interrupt, section 9.11 of Intel VT-d spec. */
+#define IRE_PIR_FLAG		0x8000
+#define IRE_PIR_URG		0x4000
+#define IRE_PIR_DESC_MSB_MASK	0xFFFFFFFF00000000UL
+#define IRE_PIR_DESC_LSB_MASK	0xFFFFFFC0UL
+#define IRE_PIR_DESC_LSB_SHIFT	32
+
+#define IR_IOAPIC_INDEX_BIT15(i)	(((i) >> 15) & 1)
+#define IR_IOAPIC_LO_INDEX_SHIFT	11
+
+#define IR_IOAPIC_INDEX_LSB_BITS(i)	((i) & 0x7FFF)
+#define IR_IOAPIC_HI_INDEX_SHIFT	17	/* BIT[63:49] */
+#define IR_IOAPIC_HI_INDEX(index)	(IR_IOAPIC_INDEX_LSB_BITS(index) <<  \
+						IR_IOAPIC_HI_INDEX_SHIFT);
+#define IR_IOAPIC_HI_IR_FMT		0x10000 /* Interrupt Format, Bit[48] */
+#define IR_IOAPIC_TM_LEVEL		0x8000	/* Trigger mode, level */
+
+/*
+ * Fault recording register.
+ * See register definition in section 10.4.14 of vt-d spec.
+ */
+struct vtd_fault_reg {
+	uint16_t :12;
+	uint64_t :36;	/* XXX: fix for DMA remap */
+	uint16_t ir_index;
+	uint16_t sid;
+	uint16_t :16;
+	uint8_t	fr;	/* Bit[103:96] */
+	uint32_t :23;
+	uint8_t	 is_fault:1;
+};
+CTASSERT(sizeof(struct vtd_fault_reg) == 16);
+
+
 static MALLOC_DEFINE(M_VTD, "vtd", "vtd");
+
+SYSCTL_DECL(_hw_vmm);
+SYSCTL_NODE(_hw_vmm, OID_AUTO, vtd, CTLFLAG_RD, NULL, "Intel VT-d/iommu bhyve device.");
+
+static int ire_index;
+SYSCTL_INT(_hw_vmm_vtd, OID_AUTO, irte_entries, CTLFLAG_RD, &ire_index,
+	0, "VT-d IR entries used.");
+
+static int enabled_vtd_ir = 0;
+SYSCTL_INT(_hw_vmm_vtd, OID_AUTO, intr_remap, CTLFLAG_RD, &enabled_vtd_ir,
+	0, "VT-d Interrupt remap enabled/disabled.");
+
+static int enabled_vtd_pir = 0;
+SYSCTL_INT(_hw_vmm_vtd, OID_AUTO, pir, CTLFLAG_RD,
+	&enabled_vtd_pir, 1, "VT-d Posted Interrupt.");
+
+/* XXX: for now make use of compatibility. */
+static int enable_intr_remap_cfi = 1;
+//TUNABLE_INT("hw.vtd_enable_ir_cfi", &enable_intr_remap_cfi);
+SYSCTL_INT(_hw_vmm_vtd, OID_AUTO, intr_remap_cfi, CTLFLAG_RD,
+	&enable_intr_remap_cfi, 0, "VT-d Interrupt remap allow CFI.");
+
+int vtd_pir_enabled(void);
+uint32_t vtd_get_apic_id(struct vm *vm, int vcpu);
+
+static void vtd_fault_handler(void *arg);
+
+/* Fault handler related. */
+static struct callout vtd_fault_callout;
+static struct mtx vtd_fault_mtx;
+
+static uint64_t iata_val;
+static struct mtx ir_mtx;
+
+extern int ioapic_intr_remap(struct intsrc *isrc);
+extern struct pic msi_pic;
+extern uint64_t vmx_get_pir(struct vm *vm, int vcpu);
 
 static int
 vtd_max_domains(struct vtdmap *vtdmap)
@@ -249,7 +388,7 @@ vtd_wbflush(struct vtdmap *vtdmap)
 		pmap_invalidate_cache();
 
 	if (VTD_CAP_RWBF(vtdmap->cap)) {
-		vtdmap->gcr = VTD_GCR_WBF;
+		vtdmap->gcr |= VTD_GCR_WBF;
 		while ((vtdmap->gsr & VTD_GSR_WBFS) != 0)
 			;
 	}
@@ -289,7 +428,7 @@ static void
 vtd_translation_enable(struct vtdmap *vtdmap)
 {
 
-	vtdmap->gcr = VTD_GCR_TE;
+	vtdmap->gcr |= VTD_GCR_TE;
 	while ((vtdmap->gsr & VTD_GSR_TES) == 0)
 		;
 }
@@ -315,6 +454,9 @@ vtd_init(void)
 	ACPI_TABLE_DMAR *dmar;
 	ACPI_DMAR_HEADER *hdr;
 	ACPI_DMAR_HARDWARE_UNIT *drhd;
+
+	callout_init(&vtd_fault_callout, CALLOUT_MPSAFE);
+	mtx_init(&vtd_fault_mtx, "vt-d fault", NULL, MTX_DEF);
 
 	/*
 	 * Allow the user to override the ACPI DMAR table by specifying the
@@ -367,6 +509,7 @@ vtd_init(void)
 	if (units <= 0)
 		return (ENXIO);
 
+	callout_reset(&vtd_fault_callout, 1 * hz, vtd_fault_handler, NULL);
 skip_dmar:
 	drhd_num = units;
 
@@ -393,12 +536,16 @@ skip_dmar:
 		root_table[i * 2] = ctx_paddr | VTD_ROOT_PRESENT;
 	}
 
+	/* Call fault handler every second. */
+	callout_reset(&vtd_fault_callout, 1 * hz, vtd_fault_handler, NULL);
+	
 	return (0);
 }
 
 static void
 vtd_cleanup(void)
 {
+	callout_drain(&vtd_fault_callout);
 }
 
 static void
@@ -413,7 +560,7 @@ vtd_enable(void)
 
 		/* Update the root table address */
 		vtdmap->rta = vtophys(root_table);
-		vtdmap->gcr = VTD_GCR_SRTP;
+		vtdmap->gcr |= VTD_GCR_SRTP;
 		while ((vtdmap->gsr & VTD_GSR_RTPS) == 0)
 			;
 
@@ -761,6 +908,275 @@ vtd_destroy_domain(void *arg)
 	free(dom, M_VTD);
 }
 
+#if 0 /* XXX: used  for legacy and non-posted MSI/X*/
+static void
+vtd_ir_irte_val(struct irte *ir, uint32_t srcID, uint32_t dstID, uint8_t vec,
+	uint8_t dlm, bool tm, bool rh, bool phys)
+{
+	/*
+	 * XXX: doesn't support x2 APIC.
+	 */
+	if (dstID >= 256) {
+		printf("INTR_REMAP: x2 APIC not supported.");
+		return;
+	}
+
+	/* XXX: SID verification */
+	ir->msb = 0;
+	ir->lsb = IRE_VECTOR(vec) | IRE_IR_DST_xAPIC(dstID) | IRE_IR_PRESENT |
+		(phys ? 0 : IRE_IR_DM_LOGICAL) |
+		(rh ? IRE_IR_RH : 0) |
+		(tm ? IRE_IR_TM_LEVEL : 0);
+}
+#endif
+/* XXX: srcID verification here???? */
+static void
+vtd_ir_pir_val(struct irte *ir, uint64_t pir_desc, uint16_t srcID,
+	uint8_t vec)
+{
+
+	printf("PIR desc: 0x%lx\n", pir_desc);
+	ir->msb = (pir_desc & IRE_PIR_DESC_MSB_MASK) | srcID;
+	ir->lsb = IRE_VECTOR(vec) | IRE_IR_PRESENT |
+		IRE_PIR_FLAG | IRE_PIR_URG |
+		((pir_desc & IRE_PIR_DESC_LSB_MASK) << IRE_PIR_DESC_LSB_SHIFT);
+}
+
+static struct irte *
+intel_ire_alloc(int *index, int count)
+{
+	mtx_lock_spin(&ir_mtx);
+	if ((ire_index >= IR_MAX_ENTRIES) ||
+		((ire_index + count) > IR_MAX_ENTRIES)) {
+		printf("No more IRE slots.\n");
+	}
+
+	*index = ire_index;
+	ire_index += count;
+	mtx_unlock_spin(&ir_mtx);
+
+	return (&intr_remap_tbl[*index]);
+}
+
+
+#define MSI_INTEL_IR_FMT		0x10	/* IR format, Bit[4] */
+#define MSI_INTEL_IR_SHV		0x8	/* SHV valid, Bit[3] */
+
+/* Setup MSI address and data format as per IR. */
+static void
+vtd_ir_msi_init(uint64_t *ir_addr, uint64_t *ir_data, int index, int n)
+{
+	*ir_addr =  MSI_INTEL_ADDR_BASE | (index << 5) | MSI_INTEL_IR_FMT |
+			MSI_INTEL_IR_SHV;
+			//((n > 1) ? MSI_INTEL_IR_SHV : 0);
+	*ir_data = 0;
+}
+
+/*
+ * Note: Addr and data is what is programmed by guest.
+ */
+static int
+vtd_ir_msi_pir_setup(void *arg, uint64_t *addr, uint64_t *data,
+	uint16_t srcID, int num)
+{
+	struct vm *vm;
+	struct irte *ire;
+	uint64_t ir_addr, ir_data, pir_desc;
+	int i, index;
+	uint32_t dstID;
+	uint8_t vec, dlm;
+	bool tm, phys;
+
+	printf("%s is called\n", __func__);
+	vm = arg;
+	ire = intel_ire_alloc(&index, num);
+	vtd_ir_msi_init(&ir_addr, &ir_data, index, num);
+
+	if (!enabled_vtd_pir) {
+		printf("warning, VT-d pir is not enabled");
+		return (EIO);
+	}
+
+	KASSERT(enabled_vtd_pir, ("VT-d PIR is not enabled"));
+	/* Decode the message and determine various bits. */
+	msi_decode(*addr, *data, &dstID, &vec, &dlm, &tm, &phys);
+
+	if (!phys) {
+		printf("VT-d PIR doesn't support logical mode.");
+		return (ENXIO);
+	}
+	/*
+	 * Get the vcpu Posted Descriptor, IR with PIR will write
+	 * directly to vcpu PIR.
+	 * Note: dstID is vcpu APIC ID.
+	 */
+	pir_desc = vmx_get_pir(vm, dstID);
+	vtd_ir_pir_val(ire, pir_desc, srcID, vec);
+
+	printf("MSI INTR_REMAP PIR[0x%x] VM Addr new: 0x%lx(old: 0x%lx) Data new: 0x%lx(old: 0x%lx),"
+		" IRE[0x%lx 0x%lx], entries=%d\n",
+		index, ir_addr, *addr, ir_data, *data, ire->msb, ire->lsb, num);
+	for ( i = 1; i < num ; i++) {
+		ire[i].msb = ire[0].msb;
+		/* Present bit is in LSB, write it at the end. */
+		ire[i].lsb = ire[0].lsb;
+	}
+
+	*addr = ir_addr;
+	*data = ir_data;
+	return (0);
+}
+
+int
+vtd_pir_enabled(void)
+{
+	return (enabled_vtd_pir);
+}
+
+static void
+vtd_ir_verify(struct vtdmap *vtdmap)
+{
+	if (!enabled_vtd_ir)
+		return;
+
+	if (!VTD_GSR_IR_ENABLED(vtdmap->gsr))
+		printf("INTR_REMAP disabled GSR:0x%x.\n", vtdmap->gsr);
+	if (vtdmap->iata != iata_val)
+		printf("IRTA mismatch, expected 0x%lx val 0x%lx\n", iata_val,
+			vtdmap->iata);
+}
+
+/* Simple VT-d fault handler, called periodic. */
+static void
+vtd_fault_handler(void *arg)
+{
+	struct vtdmap *vtdmap;
+	struct vtd_fault_reg *fault;
+	uint32_t offset, *raw;
+	uint8_t *ptr;
+	int i, j, max, index;
+	static int count;
+
+	mtx_lock(&vtd_fault_mtx);
+	count++;
+	for (i = 0; i < drhd_num; i++) {
+		vtdmap = vtdmaps[i];
+		vtd_ir_verify(vtdmap);
+
+		//printf("VT-d[%d] vtdmap: %p index: %d\n", i, vtdmap, offset);
+		//if (!(vtdmap->fsr & 0x2))
+		if (!(vtdmap->fsr))
+			continue;
+		offset = VTD_CAP_FRO(vtdmap->cap);
+		ptr = (uint8_t *)vtdmap;
+		printf("VT-d[%d] vtdmap: %p index: %d\n", i, vtdmap, offset);
+		fault = (struct vtd_fault_reg *)&ptr[offset];
+
+		index = VTD_FSR_INDEX(vtdmap->fsr);
+		max = VTD_CAP_NFR(vtdmap->cap);
+		for ( j = index; j < max; j++, fault++) {
+			if (!fault->is_fault) {
+				continue;
+			}
+			raw = (uint32_t *)fault;
+			printf("  VT-d[%d] FSR:0x%x(max %d) "
+				"Fault[%d]:0x%x INTR_REMAP index %d"
+				"SID:0x%x [RAW 0x%x 0x%x 0x%x 0x%x]\n",
+				i, vtdmap->fsr, max, j, fault->fr,
+				fault->ir_index, fault->sid,
+				 raw[3], raw[2], raw[1], raw[0]);
+			fault->is_fault = 1;
+		}
+	}
+	mtx_unlock(&vtd_fault_mtx);
+
+	callout_reset(&vtd_fault_callout, 1 * hz, vtd_fault_handler, NULL);
+}
+
+static int
+vtd_ir_enable(struct vtdmap *vtdmap)
+{
+	int i;
+
+	if (VTD_ECAP_IR(vtdmap->ext_cap) == 0) {
+		printf("VT-d extcap: 0x%lx\n", vtdmap->ext_cap);
+		return (ENXIO);
+	}
+
+	/* First program INTR_REMAP table of size 1K entries. */
+	iata_val = vtophys(intr_remap_tbl) | 5;//(IR_MAX_ENTRIES_POWER2 - 1);
+	vtdmap->iata = iata_val;
+	printf("INTR_REMAP IRTA:0x%lx\n", vtdmap->iata);
+	printf("INTR_REMAP GCR:0x%x\n", vtdmap->gcr);
+
+	vtdmap->gcr |= (VTD_GCR_SIRTP | VTD_GCR_IRE);
+	printf("INTR_REMAP GCR:0x%x\n", vtdmap->gcr);
+	
+	/*
+	 * XXX: Allow old/compatible and new(IR) format interrupts to co-exist
+	 * in system to not change non passthrough devices. 
+	 *  - Only passthrough devices will have to use IR format and use IR.
+	 *  - other devices remian untouched????
+	 */ 
+	if (enable_intr_remap_cfi)
+		vtdmap->gcr |= VTD_GCR_CFI;
+
+	/* XXX: force IRE, SIRTP and CFI for debug. */
+	vtdmap->gcr |= 0x3800000;
+	printf("INTR_REMAP GCR:0x%x\n", vtdmap->gcr);
+	i = 0;
+	while (((vtdmap->gsr & VTD_GSR_IRTPS) != 0) && ( i < 1000)) {
+		DELAY(1000);		/* 1 ms */
+		i++;
+	}
+
+	printf("INTR_REMAP GCR:0x%x\n", vtdmap->gcr);
+	if (!(VTD_GSR_IR_ENABLED(vtdmap->gsr))) {
+		printf("Failed to enable Interrupt Remap, GSR:0x%x.\n",
+			vtdmap->gsr);
+		return (ENXIO);
+	}
+
+	printf("VT-d interrupt remap is enabled, GSR:0x%x\n", vtdmap->gsr);
+
+	return (0);
+}
+
+static int
+vtd_ir_init(void)
+{
+	struct vtdmap *vtdmap;
+	int i, error;
+
+	if (!drhd_num) {
+		printf("No VT-d engine found.\n");
+		return (EIO);
+	}
+
+	printf("Number of DRHD found: %d\n", drhd_num);
+
+	for (i = 0; i < drhd_num; i++) {
+		vtdmap = vtdmaps[i];
+		error = vtd_ir_enable(vtdmap);
+		if (error)
+			return (error);
+
+		enabled_vtd_ir = 1;
+		printf("VT-d[%d] CAP: 0x%lx\n", i, vtdmap->cap);
+		if (VTD_CAP_PI(vtdmap->cap)) {
+			enabled_vtd_pir = 1;
+			//intr_remap->ir_msi_pir = vtd_ir_msi_pir_setup;
+		}
+	}
+
+	mtx_init(&ir_mtx, "intel-ir", NULL, MTX_SPIN);
+
+	printf("INTR REMAP %s supported and enabled\n",
+		enabled_vtd_pir ? "and POSTED INTR" : "");
+
+	return (0);
+}
+
 struct iommu_ops iommu_ops_intel = {
 	vtd_init,
 	vtd_cleanup,
@@ -773,4 +1189,8 @@ struct iommu_ops iommu_ops_intel = {
 	vtd_add_device,
 	vtd_remove_device,
 	vtd_invalidate_tlb,
+
+	/* IR related. */
+	vtd_ir_init,
+	vtd_ir_msi_pir_setup,
 };

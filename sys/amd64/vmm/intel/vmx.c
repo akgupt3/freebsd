@@ -119,6 +119,8 @@ __FBSDID("$FreeBSD$");
 #define	HANDLED		1
 #define	UNHANDLED	0
 
+uint64_t vmx_get_pir(struct vm *vm, int vcpu);
+
 static MALLOC_DEFINE(M_VMX, "vmx", "vmx");
 static MALLOC_DEFINE(M_VLAPIC, "vlapic", "vlapic");
 
@@ -3644,6 +3646,20 @@ vmx_enable_x2apic_mode(struct vlapic *vlapic)
 		KASSERT(error == 0, ("%s: vmx_allow_x2apic_msrs error %d",
 		    __func__, error));
 	}
+}
+
+uint64_t
+vmx_get_pir(struct vm *vm, int vcpu)
+{
+        struct vlapic_vtx *vlapic_vtx;
+        struct pir_desc *pir_desc;
+        struct vlapic *vlapic;
+
+        vlapic = vm_lapic(vm, vcpu);
+        vlapic_vtx = (struct vlapic_vtx *)vlapic;
+        pir_desc = vlapic_vtx->pir_desc;
+
+        return (vtophys(pir_desc));
 }
 
 static void

@@ -74,4 +74,6 @@ int	lapic_set_local_intr(struct vm *vm, int cpu, int vector);
 
 int	lapic_intr_msi(struct vm *vm, uint64_t addr, uint64_t msg);
 
+void 	msi_decode(uint64_t addr, uint64_t msg, uint32_t *dstID,
+        uint8_t *vec, uint8_t *delmode, bool *tm, bool *phys);
 #endif

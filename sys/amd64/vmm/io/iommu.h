@@ -44,6 +44,11 @@ typedef uint64_t (*iommu_remove_mapping_t)(void *domain, vm_paddr_t gpa,
 typedef void (*iommu_add_device_t)(void *domain, uint16_t rid);
 typedef void (*iommu_remove_device_t)(void *dom, uint16_t rid);
 typedef void (*iommu_invalidate_tlb_t)(void *dom);
+/* INterrupt remap. */
+typedef int (*iommu_ir_init_t)(void);
+typedef int (*iommu_ir_msi_pir_init_t)(void *arg, uint64_t *addr,
+				      uint64_t *data, uint16_t srcID, int num);
+struct vm;
 
 struct iommu_ops {
 	iommu_init_func_t	init;		/* module wide */
@@ -58,6 +63,8 @@ struct iommu_ops {
 	iommu_add_device_t	add_device;
 	iommu_remove_device_t	remove_device;
 	iommu_invalidate_tlb_t	invalidate_tlb;
+	iommu_ir_init_t		iommu_ir_init;
+	iommu_ir_msi_pir_init_t	iommu_ir_msi_pir_init;
 };
 
 extern struct iommu_ops iommu_ops_intel;
@@ -73,4 +80,10 @@ void	iommu_remove_mapping(void *dom, vm_paddr_t gpa, size_t len);
 void	iommu_add_device(void *dom, uint16_t rid);
 void	iommu_remove_device(void *dom, uint16_t rid);
 void	iommu_invalidate_tlb(void *domain);
+int 	iommu_ir_msi_setup(struct vm *vm, uint64_t *addr, uint64_t *data,
+		uint16_t srcId, int num);
+
+/* Interrupt remap related. */
+extern void (*vmm_intr_remap_p)(device_t dev, void *arg, uint64_t *addr,
+				uint32_t *data);
 #endif

@@ -50,6 +50,7 @@ __FBSDID("$FreeBSD$");
 #define	MSI_X86_ADDR_BASE	0xfee00000
 #define	MSI_X86_ADDR_RH		0x00000008	/* Redirection Hint */
 #define	MSI_X86_ADDR_LOG	0x00000004	/* Destination Mode */
+#define MSI_X86_DATA_LEVEL      0x00008000      /* Trigger mode - Level */
 
 int
 lapic_set_intr(struct vm *vm, int cpu, int vector, bool level)
@@ -240,4 +241,43 @@ lapic_mmio_read(void *vm, int cpu, uint64_t gpa, uint64_t *rval, int size,
 	vlapic = vm_lapic(vm, cpu);
 	error = vlapic_read(vlapic, 1, off, rval, arg);
 	return (error);
+}
+
+/* Decode MSI message, can be used by lapic_intr_msi() */
+void
+msi_decode(uint64_t addr, uint64_t msg, uint32_t *dstID,
+        uint8_t *vec, uint8_t *delmode, bool *tm, bool *phys)
+{
+
+        VM_CTR2(vm, "lapic MSI addr: %#lx msg: %#lx", addr, msg);
+
+        if ((addr & MSI_X86_ADDR_MASK) != MSI_X86_ADDR_BASE) {
+                VM_CTR1(vm, "lapic MSI invalid addr %#lx", addr);
+                return;
+        }
+
+        /*
+         * Extract the x86-specific fields from the MSI addr/msg
+         * params according to the Intel Arch spec, Vol3 Ch 10.
+         *
+         * The PCI specification does not support level triggered
+         * MSI/MSI-X so ignore trigger level in 'msg'.
+         *
+         * The 'dest' is interpreted as a logical APIC ID if both
+         * the Redirection Hint and Destination Mode are '1' and
+         * physical otherwise.
+         */
+        *dstID = (addr >> 12) & 0xff;
+        *phys = ((addr & (MSI_X86_ADDR_RH | MSI_X86_ADDR_LOG)) !=
+            (MSI_X86_ADDR_RH | MSI_X86_ADDR_LOG));
+        *delmode = msg & APIC_DELMODE_MASK;
+        *vec = msg & 0xff;
+        *tm = msg & MSI_X86_DATA_LEVEL;
+
+        if (!phys)
+                panic("Logical mode was not expected.");
+
+        VM_CTR3(vm, "lapic MSI %s dest %#x, vec %d",
+            phys ? "physical" : "logical", dest, vec);
+
 }

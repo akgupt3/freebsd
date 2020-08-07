@@ -45,6 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
 
+#include <machine/intr_machdep.h>
 #include <machine/resource.h>
 
 #include <machine/vmm.h>
@@ -500,6 +501,112 @@ pptintr(void *arg)
 		return (FILTER_HANDLED);
 }
 
+/*
+ * Return the new MSI/X address and data value for programming the devices.
+ */
+/* XXX: addr, data is unused if we don't touch non-passthrogh devices. */
+void
+ppt_ir_msi_setup(device_t dev, void *pptarg_addr, uint64_t *addr, uint32_t *data)
+{
+	struct pptintr_arg *pptarg;
+	struct pptdev *ppt;
+	struct pci_devinfo *dinfo;
+	struct vm *vm;
+	uint64_t vm_addr, vm_data, new_addr, new_data;
+	uint16_t srcID;
+	int n, err;
+
+	//printf("%s pptarg addr is %p.\n", __func__, pptarg_addr);
+	/*
+	 * XXX: pptarg_addr is not available.
+	 */
+	if (!pptarg_addr) {
+		printf("%s pptarg addr is NULL.\n",
+				__func__);
+		return;
+	}
+
+	printf("Host MSI/X addr: 0x%lx data: 0x%x\n", *addr, *data);
+	pptarg = pptarg_addr;
+	ppt = pptarg->pptdev;
+	vm = ppt->vm;
+	/*
+	 * For posted interrupt we need VM MSI/X address and data 
+	 * to retrieve vcpu PIR desc and vcpu vector.
+	 */
+	vm_addr = pptarg->addr;
+	vm_data = pptarg->msg_data;
+	dinfo = device_get_ivars(ppt->dev);
+	srcID = pci_get_rid(ppt->dev);
+	if (dinfo->cfg.msi.msi_alloc)
+		n = dinfo->cfg.msi.msi_alloc;
+	else
+		n = 1; /* MSI/X, one message at a time. */
+
+	/*
+	 * XXX: we pass VM MSI/X address and data and get back host MSI/X addr
+	 *      and data.
+	 */
+	new_addr = vm_addr;
+	new_data = vm_data;
+	err = iommu_ir_msi_setup(vm, &new_addr, &new_data, srcID, n);
+	if (err) {
+		printf("Failed to configure INTR REMAP PIR, error: %d\n", err);
+		return;
+	}
+
+	//printf("%s setup is done.\n", __func__);
+	*addr = new_addr;
+	*data = new_data;
+}
+
+#if 0 // replaced by iommu_ir_msi_pir-setup().
+void
+vmm_ppt_ir_setup(device_t dev, void *arg, uint64_t *addr, uint32_t *data)
+{
+	struct pptintr_arg *pptarg;
+	struct pptdev *ppt;
+	struct pci_devinfo *dinfo;
+	struct vm *vm;
+	uint64_t vm_addr, vm_data, new_addr, new_data;
+	uint32_t srcID = 0; /* XXX:fixme */
+	int n, err;
+
+	if (!arg)
+		panic("No expected to called in this path.");
+
+	pptarg = arg;
+	ppt = pptarg->pptdev;
+	vm_addr = pptarg->addr;
+	vm_data = pptarg->msg_data;
+	vm = ppt->vm;
+	dinfo = device_get_ivars(ppt->dev);
+
+	if (dinfo->cfg.msi.msi_alloc)
+		n = dinfo->cfg.msi.msi_alloc;
+	else
+		n = 1; /* MSI/X, one message at a time. */
+
+	KASSERT(intr_remap->ir_msi, ("INTR_REMAP not initilaised."));
+	if (intr_remap->ir_msi_pir) {
+		new_addr = vm_addr;
+		new_data = vm_data;
+		err = (intr_remap->ir_msi_pir)(vm, &new_addr, &new_data, srcID, n);
+	} else {
+		new_addr = *addr;
+		new_data = *data;
+		err = (intr_remap->ir_msi)(&new_addr, &new_data, srcID, n);
+	}
+
+	if (err) {
+		panic("Failed to configure INTR REMAP\n");
+		return;
+	}
+
+	*addr = new_addr;
+	*data = new_data;
+}
+#endif
 int
 ppt_setup_msi(struct vm *vm, int vcpu, int bus, int slot, int func,
 	      uint64_t addr, uint64_t msg, int numvec)
