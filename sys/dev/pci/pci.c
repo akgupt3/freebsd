@@ -420,6 +420,9 @@ SYSCTL_INT(_hw_pci, OID_AUTO, clear_aer_on_attach, CTLFLAG_RWTUN,
     &pci_clear_aer_on_attach, 0,
     "Clear port and device AER state on driver attach");
 
+/* Bhyve interrupt remap hook. */
+void (*vmm_intr_remap_p)(device_t dev, void *arg, uint64_t *addr, uint32_t *data);
+
 static int
 pci_has_quirk(uint32_t devid, int quirk)
 {
@@ -2379,6 +2382,12 @@ pci_remap_intr_method(device_t bus, device_t dev, u_int irq)
 				if (error)
 					return (error);
 				pci_disable_msi(dev);
+				/*
+				 * If platform has interrupt remap support, program MSI/X
+				 * with interrupt remap address and data value.
+				 */
+				if (vmm_intr_remap_p)
+					vmm_intr_remap_p(dev, NULL, &addr, &data);
 				dinfo->cfg.msi.msi_addr = addr;
 				dinfo->cfg.msi.msi_data = data;
 				pci_enable_msi(dev, addr, data);
@@ -2401,6 +2410,12 @@ pci_remap_intr_method(device_t bus, device_t dev, u_int irq)
 				    dev, irq, &addr, &data);
 				if (error)
 					return (error);
+				/*
+				 * If platform has interrupt remap support, program MSI/X
+				 * with interrupt remap address and data value.
+				 */
+				if (vmm_intr_remap_p)
+					vmm_intr_remap_p(dev, NULL, &addr, &data);
 				mv->mv_address = addr;
 				mv->mv_data = data;
 				for (j = 0; j < cfg->msix.msix_table_len; j++) {
@@ -4658,6 +4673,12 @@ pci_setup_intr(device_t dev, device_t child, struct resource *irq, int flags,
 				    child, rman_get_start(irq), &addr, &data);
 				if (error)
 					goto bad;
+				/*
+				 * If platform has interrupt remap support, program MSI/X
+				 * with interrupt remap address and data value.
+				 */
+				if (vmm_intr_remap_p)
+					vmm_intr_remap_p(dev, arg, &addr, &data);
 				dinfo->cfg.msi.msi_addr = addr;
 				dinfo->cfg.msi.msi_data = data;
 			}
@@ -4682,6 +4703,12 @@ pci_setup_intr(device_t dev, device_t child, struct resource *irq, int flags,
 				    child, rman_get_start(irq), &addr, &data);
 				if (error)
 					goto bad;
+				/*
+				 * If platform has interrupt remap support, program MSI/X
+				 * with interrupt remap address and data value.
+				 */
+				if (vmm_intr_remap_p)
+					vmm_intr_remap_p(dev, arg, &addr, &data);
 				mv->mv_address = addr;
 				mv->mv_data = data;
 			}

@@ -53,4 +53,6 @@ int	ppt_avail_devices(void);
  */
 int	ppt_assign_device(struct vm *vm, int bus, int slot, int func);
 int	ppt_unassign_device(struct vm *vm, int bus, int slot, int func);
+
+void 	ppt_ir_msi_setup(device_t dev, void *pptarg_addr, uint64_t *addr, uint32_t *data);
 #endif

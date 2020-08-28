@@ -239,6 +239,7 @@ static void vm_free_memmap(struct vm *vm, int ident);
 static bool sysmem_mapping(struct vm *vm, struct mem_map *mm);
 static void vcpu_notify_event_locked(struct vcpu *vcpu, bool lapic_intr);
 
+
 #ifdef KTR
 static const char *
 vcpu_state2str(enum vcpu_state state)
@@ -345,9 +346,9 @@ vmm_init(void)
 	if (error)
 		return (error);
 	
-	if (vmm_is_intel())
+	if (vmm_is_intel()) {
 		ops = &vmm_ops_intel;
-	else if (vmm_is_svm())
+	} else if (vmm_is_svm())
 		ops = &vmm_ops_amd;
 	else
 		return (ENXIO);
@@ -368,6 +369,7 @@ vmm_handler(module_t mod, int what, void *arg)
 		error = vmm_init();
 		if (error == 0)
 			vmm_initialized = 1;
+
 		break;
 	case MOD_UNLOAD:
 		error = vmmdev_cleanup();

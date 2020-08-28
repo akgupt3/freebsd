@@ -34,6 +34,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/systm.h>
+#include <sys/kernel.h>
 #include <sys/bus.h>
 #include <sys/sysctl.h>
 
@@ -42,6 +43,9 @@ __FBSDID("$FreeBSD$");
 
 #include <machine/cpu.h>
 #include <machine/md_var.h>
+
+#include <vm/vm.h>
+#include <vm/pmap.h>
 
 #include "vmm_util.h"
 #include "vmm_mem.h"
@@ -58,10 +62,17 @@ static int iommu_enable = 1;
 SYSCTL_INT(_hw_vmm_iommu, OID_AUTO, enable, CTLFLAG_RDTUN, &iommu_enable, 0,
     "Enable use of I/O MMU (required for PCI passthrough).");
 
+static int enable_intr_remap = 0;
+TUNABLE_INT("hw.vmm.iommu.enable_ir", &enable_intr_remap);
+SYSCTL_INT(_hw_vmm_iommu, OID_AUTO, intr_remap, CTLFLAG_RW, &enable_intr_remap, 0,
+        "VMM make use of IOMMU Interrupt Remap engine");
+
 static struct iommu_ops *ops;
 static void *host_domain;
 static eventhandler_tag add_tag, delete_tag;
 
+extern void ppt_ir_msi_setup(device_t dev, void *pptarg_addr, uint64_t *addr,
+			     uint32_t *data);
 static __inline int
 IOMMU_INIT(void)
 {
@@ -156,6 +167,29 @@ IOMMU_DISABLE(void)
 		(*ops->disable)();
 }
 
+static __inline int
+IOMMU_IR_INIT(void)
+{
+
+	if (ops != NULL && ops->iommu_ir_init != NULL && iommu_avail)
+		return (*ops->iommu_ir_init)();
+
+	return (EINVAL);
+}
+
+/* For setup IR h/w accelerator like VT-d PIR */
+/* XXX: change void *vm to vm* vm*/
+static __inline int
+IOMMU_IR_MSI_PIR_SETUP(void *vm, uint64_t *addr, uint64_t *data,
+		uint16_t srcID, int num)
+{
+
+	if (ops != NULL && ops->iommu_ir_msi_pir_init != NULL && iommu_avail)
+		return (*ops->iommu_ir_msi_pir_init)(vm, addr, data, srcID, num);
+
+	return (EINVAL);
+}
+
 static void
 iommu_pci_add(void *arg, device_t dev)
 {
@@ -169,6 +203,17 @@ iommu_pci_delete(void *arg, device_t dev)
 {
 
 	iommu_remove_device(host_domain, pci_get_rid(dev));
+}
+
+/*
+ * Return the new MSI/X address and data value for programming the devices.
+ */
+/* XXX: addr, data is unused if we don't touch non-passthrogh devices. */
+int
+iommu_ir_msi_setup(struct vm *vm, uint64_t *addr, uint64_t *data,
+		uint16_t srcId, int num)
+{
+	return IOMMU_IR_MSI_PIR_SETUP(vm, addr, data, srcId, num);
 }
 
 static void
@@ -212,6 +257,12 @@ iommu_init(void)
 	 * Create 1:1 mappings from '0' to 'maxaddr' for devices assigned to
 	 * the host
 	 */
+#if 0
+	for (i = 0; i <= phys_avail[i + 1]; i+= 2) {
+		iommu_create_mapping(host_domain, phys_avail[i], phys_avail[i], phys_avail[i+1] - phys_avail[i]);
+		printf("bhyve: createing map start: 0x%lx end: 0x%lx\n", phys_avail[i], phys_avail[i+1]);
+	}
+#endif	
 	iommu_create_mapping(host_domain, 0, 0, maxaddr);
 
 	add_tag = EVENTHANDLER_REGISTER(pci_add_device, iommu_pci_add, NULL, 0);
@@ -241,11 +292,23 @@ iommu_init(void)
 	}
 	IOMMU_ENABLE();
 
+	if (enable_intr_remap) {
+		printf("Initializing IR engine\n");
+		error = IOMMU_IR_INIT();
+		if (error) {
+			printf("iommu_init: interrupt remap init failed,"
+				"error: %d\n", error);
+			return;
+		}	
+		vmm_intr_remap_p = ppt_ir_msi_setup;
+	}
 }
 
 void
 iommu_cleanup(void)
 {
+	/* XXX: deinit IR engine. */
+	vmm_intr_remap_p = NULL;
 
 	if (add_tag != NULL) {
 		EVENTHANDLER_DEREGISTER(pci_add_device, add_tag);
