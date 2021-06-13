@@ -53,12 +53,12 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
-#include <sys/clock.h>
 #include <sys/errno.h>
 #include <sys/mman.h>
 #include <sys/time.h>
 
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -102,7 +102,11 @@ msdosfs_times(struct denode *dep, const struct stat *st)
 	if (stampst.st_ino)
 		st = &stampst;
 
+#ifdef HAVE_STRUCT_STAT_BIRTHTIME
 	unix2fattime(&st->st_birthtim, &dep->de_CDate, &dep->de_CTime);
+#else
+	unix2fattime(&st->st_ctim, &dep->de_CDate, &dep->de_CTime);
+#endif
 	unix2fattime(&st->st_atim, &dep->de_ADate, NULL);
 	unix2fattime(&st->st_mtim, &dep->de_MDate, &dep->de_MTime);
 }
@@ -463,15 +467,15 @@ msdosfs_wfile(const char *path, struct denode *dep, fsnode *node)
 
 	if ((fd = open(path, O_RDONLY)) == -1) {
 		error = errno;
-		MSDOSFS_DPRINTF(("open %s: %s", path, strerror(error)));
+		fprintf(stderr, "open %s: %s\n", path, strerror(error));
 		return error;
 	}
 
 	if ((dat = mmap(0, nsize, PROT_READ, MAP_FILE | MAP_PRIVATE, fd, 0))
 	    == MAP_FAILED) {
 		error = errno;
-		MSDOSFS_DPRINTF(("%s: mmap %s: %s", __func__, node->name,
-		    strerror(error)));
+		fprintf(stderr, "%s: mmap %s: %s\n", __func__, node->name,
+		    strerror(error));
 		close(fd);
 		goto out;
 	}

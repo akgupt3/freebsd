@@ -174,6 +174,7 @@ struct vop_vector fuse_fifoops = {
 	.vop_write =		VOP_PANIC,
 	.vop_vptofh =		fuse_vnop_vptofh,
 };
+VFS_VOP_VECTOR_REGISTER(fuse_fifoops);
 
 struct vop_vector fuse_vnops = {
 	.vop_allocate =	VOP_EINVAL,
@@ -223,6 +224,7 @@ struct vop_vector fuse_vnops = {
 	.vop_print = fuse_vnop_print,
 	.vop_vptofh = fuse_vnop_vptofh,
 };
+VFS_VOP_VECTOR_REGISTER(fuse_vnops);
 
 uma_zone_t fuse_pbuf_zone;
 
@@ -233,6 +235,7 @@ fuse_extattr_check_cred(struct vnode *vp, int ns, struct ucred *cred,
 {
 	struct mount *mp = vnode_mount(vp);
 	struct fuse_data *data = fuse_get_mpdata(mp);
+	int default_permissions = data->dataflags & FSESS_DEFAULT_PERMISSIONS;
 
 	/*
 	 * Kernel-invoked always succeeds.
@@ -246,12 +249,15 @@ fuse_extattr_check_cred(struct vnode *vp, int ns, struct ucred *cred,
 	 */
 	switch (ns) {
 	case EXTATTR_NAMESPACE_SYSTEM:
-		if (data->dataflags & FSESS_DEFAULT_PERMISSIONS) {
+		if (default_permissions) {
 			return (priv_check_cred(cred, PRIV_VFS_EXTATTR_SYSTEM));
 		}
-		/* FALLTHROUGH */
+		return (0);
 	case EXTATTR_NAMESPACE_USER:
-		return (fuse_internal_access(vp, accmode, td, cred));
+		if (default_permissions) {
+			return (fuse_internal_access(vp, accmode, td, cred));
+		}
+		return (0);
 	default:
 		return (EPERM);
 	}
@@ -504,7 +510,7 @@ fuse_vnop_bmap(struct vop_bmap_args *ap)
 	if (runp != NULL) {
 		error = fuse_vnode_size(vp, &filesize, td->td_ucred, td);
 		if (error == 0)
-			*runp = MIN(MAX(0, filesize / biosize - lbn - 1),
+			*runp = MIN(MAX(0, filesize / (off_t)biosize - lbn - 1),
 				    maxrun);
 		else
 			*runp = 0;
@@ -662,7 +668,7 @@ fuse_vnop_create(struct vop_create_args *ap)
 		fci->flags = O_CREAT | flags;
 		if (fuse_libabi_geq(data, 7, 12)) {
 			insize = sizeof(*fci);
-			fci->umask = td->td_proc->p_fd->fd_cmask;
+			fci->umask = td->td_proc->p_pd->pd_cmask;
 		} else {
 			insize = sizeof(struct fuse_open_in);
 		}
@@ -844,14 +850,13 @@ fake:
 /*
     struct vnop_inactive_args {
 	struct vnode *a_vp;
-	struct thread *a_td;
     };
 */
 static int
 fuse_vnop_inactive(struct vop_inactive_args *ap)
 {
 	struct vnode *vp = ap->a_vp;
-	struct thread *td = ap->a_td;
+	struct thread *td = curthread;
 
 	struct fuse_vnode_data *fvdat = VTOFUD(vp);
 	struct fuse_filehandle *fufh, *fufh_tmp;
@@ -959,6 +964,8 @@ fuse_lookup_alloc(struct mount *mp, void *arg, int lkflags, struct vnode **vpp)
 
 SDT_PROBE_DEFINE3(fusefs, , vnops, cache_lookup,
 	"int", "struct timespec*", "struct timespec*");
+SDT_PROBE_DEFINE2(fusefs, , vnops, lookup_cache_incoherent,
+	"struct vnode*", "struct fuse_entry_out*");
 /*
     struct vnop_lookup_args {
 	struct vnodeop_desc *a_desc;
@@ -981,6 +988,8 @@ fuse_vnop_lookup(struct vop_lookup_args *ap)
 	int wantparent = flags & (LOCKPARENT | WANTPARENT);
 	int islastcn = flags & ISLASTCN;
 	struct mount *mp = vnode_mount(dvp);
+	struct fuse_data *data = fuse_get_mpdata(mp);
+	int default_permissions = data->dataflags & FSESS_DEFAULT_PERMISSIONS;
 
 	int err = 0;
 	int lookup_err = 0;
@@ -1004,7 +1013,9 @@ fuse_vnop_lookup(struct vop_lookup_args *ap)
 	if (islastcn && vfs_isrdonly(mp) && (nameiop != LOOKUP))
 		return EROFS;
 
-	if ((err = fuse_internal_access(dvp, VEXEC, td, cred)))
+	if ((cnp->cn_flags & NOEXECCHECK) != 0)
+		cnp->cn_flags &= ~NOEXECCHECK;
+	else if ((err = fuse_internal_access(dvp, VEXEC, td, cred)))
 		return err;
 
 	if (flags & ISDOTDOT) {
@@ -1023,8 +1034,9 @@ fuse_vnop_lookup(struct vop_lookup_args *ap)
 		filesize = 0;
 	} else {
 		struct timespec now, timeout;
+		int ncpticks; /* here to accomodate for API contract */
 
-		err = cache_lookup(dvp, vpp, cnp, &timeout, NULL);
+		err = cache_lookup(dvp, vpp, cnp, &timeout, &ncpticks);
 		getnanouptime(&now);
 		SDT_PROBE3(fusefs, , vnops, cache_lookup, err, &timeout, &now);
 		switch (err) {
@@ -1102,7 +1114,11 @@ fuse_vnop_lookup(struct vop_lookup_args *ap)
 	if (lookup_err) {
 		/* Entry not found */
 		if ((nameiop == CREATE || nameiop == RENAME) && islastcn) {
-			err = fuse_internal_access(dvp, VWRITE, td, cred);
+			if (default_permissions)
+				err = fuse_internal_access(dvp, VWRITE, td,
+				    cred);
+			else
+				err = 0;
 			if (!err) {
 				/*
 				 * Set the SAVENAME flag to hold onto the
@@ -1133,6 +1149,7 @@ fuse_vnop_lookup(struct vop_lookup_args *ap)
 			*vpp = dvp;
 		} else {
 			struct fuse_vnode_data *fvdat;
+			struct vattr *vap;
 
 			err = fuse_vnode_get(vnode_mount(dvp), feo, nid, dvp,
 			    &vp, cnp, vtyp);
@@ -1153,22 +1170,27 @@ fuse_vnop_lookup(struct vop_lookup_args *ap)
 			 */
 			fvdat = VTOFUD(vp);
 			if (vnode_isreg(vp) &&
-			    filesize != fvdat->cached_attrs.va_size &&
-			    fvdat->flag & FN_SIZECHANGE) {
-				/*
-				 * The FN_SIZECHANGE flag reflects a dirty
-				 * append.  If userspace lets us know our cache
-				 * is invalid, that write was lost.  (Dirty
-				 * writes that do not cause append are also
-				 * lost, but we don't detect them here.)
-				 *
-				 * XXX: Maybe disable WB caching on this mount.
-				 */
-				printf("%s: WB cache incoherent on %s!\n",
-				    __func__,
-				    vnode_mount(vp)->mnt_stat.f_mntonname);
-
+			    ((filesize != fvdat->cached_attrs.va_size &&
+			      fvdat->flag & FN_SIZECHANGE) ||
+			     ((vap = VTOVA(vp)) &&
+			      filesize != vap->va_size)))
+			{
+				SDT_PROBE2(fusefs, , vnops, lookup_cache_incoherent, vp, feo);
 				fvdat->flag &= ~FN_SIZECHANGE;
+				/*
+				 * The server changed the file's size even
+				 * though we had it cached, or had dirty writes
+				 * in the WB cache!
+				 */
+				printf("%s: cache incoherent on %s!  "
+		    		    "Buggy FUSE server detected.  To prevent "
+				    "data corruption, disable the data cache "
+				    "by mounting with -o direct_io, or as "
+				    "directed otherwise by your FUSE server's "
+		    		    "documentation\n", __func__,
+				    vnode_mount(vp)->mnt_stat.f_mntonname);
+				int iosize = fuse_iosize(vp);
+				v_inval_buf_range(vp, 0, INT64_MAX, iosize);
 			}
 
 			MPASS(feo != NULL);
@@ -1179,7 +1201,7 @@ fuse_vnop_lookup(struct vop_lookup_args *ap)
 				&fvdat->entry_cache_timeout);
 
 			if ((nameiop == DELETE || nameiop == RENAME) &&
-				islastcn)
+				islastcn && default_permissions)
 			{
 				struct vattr dvattr;
 
@@ -1209,7 +1231,6 @@ fuse_vnop_lookup(struct vop_lookup_args *ap)
 				(nameiop == RENAME && wantparent))) {
 				cnp->cn_flags |= SAVENAME;
 			}
-
 		}
 	}
 out:
@@ -1248,7 +1269,7 @@ fuse_vnop_mkdir(struct vop_mkdir_args *ap)
 		return ENXIO;
 	}
 	fmdi.mode = MAKEIMODE(vap->va_type, vap->va_mode);
-	fmdi.umask = curthread->td_proc->p_fd->fd_cmask;
+	fmdi.umask = curthread->td_proc->p_pd->pd_cmask;
 
 	return (fuse_internal_newentry(dvp, vpp, cnp, FUSE_MKDIR, &fmdi,
 	    sizeof(fmdi), VDIR));
@@ -1505,14 +1526,13 @@ out:
 /*
     struct vnop_reclaim_args {
 	struct vnode *a_vp;
-	struct thread *a_td;
     };
 */
 static int
 fuse_vnop_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vnode *vp = ap->a_vp;
-	struct thread *td = ap->a_td;
+	struct thread *td = curthread;
 	struct fuse_vnode_data *fvdat = VTOFUD(vp);
 	struct fuse_filehandle *fufh, *fufh_tmp;
 
@@ -1525,11 +1545,10 @@ fuse_vnop_reclaim(struct vop_reclaim_args *ap)
 		fuse_filehandle_close(vp, fufh, td, NULL);
 	}
 
-	if ((!fuse_isdeadfs(vp)) && (fvdat->nlookup)) {
+	if (!fuse_isdeadfs(vp) && fvdat->nlookup > 0) {
 		fuse_internal_forget_send(vnode_mount(vp), td, NULL, VTOI(vp),
 		    fvdat->nlookup);
 	}
-	fuse_vnode_setparent(vp, NULL);
 	cache_purge(vp);
 	vfs_hash_remove(vp);
 	fuse_vnode_destroy(vp);
@@ -1817,7 +1836,11 @@ fuse_vnop_setattr(struct vop_setattr_args *ap)
 	if (vfs_isrdonly(mp))
 		return EROFS;
 
-	err = fuse_internal_access(vp, accmode, td, cred);
+	if (checkperm) {
+		err = fuse_internal_access(vp, accmode, td, cred);
+	} else {
+		err = 0;
+	}
 	if (err)
 		return err;
 	else
@@ -1851,7 +1874,6 @@ fuse_vnop_strategy(struct vop_strategy_args *ap)
 
 	return 0;
 }
-
 
 /*
     struct vnop_symlink_args {
@@ -2095,7 +2117,7 @@ fuse_vnop_setextattr(struct vop_setextattr_args *ap)
 	size_t len;
 	char *attr_str;
 	int err;
-	
+
 	if (fuse_isdeadfs(vp))
 		return (ENXIO);
 
@@ -2441,7 +2463,7 @@ fuse_vnop_print(struct vop_print_args *ap)
 
 	return 0;
 }
-	
+
 /*
  * Get an NFS filehandle for a FUSE file.
  *
@@ -2484,5 +2506,3 @@ fuse_vnop_vptofh(struct vop_vptofh_args *ap)
 		return EOVERFLOW;
 	return (0);
 }
-
-

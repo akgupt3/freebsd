@@ -6,7 +6,6 @@
 .include <src.opts.mk>
 
 PACKAGE=runtime
-TAGS+=	development
 CLEANFILES= osreldate.h version
 SUBDIR= arpa protocols rpcsvc rpc xlocale
 SUBDIR_PARALLEL=
@@ -43,7 +42,7 @@ LDIRS=	bsm cam geom net net80211 netgraph netinet netinet6 \
 	netipsec netsmb nfs nfsclient nfsserver sys vm
 
 LSUBDIRS=	cam/ata cam/mmc cam/nvme cam/scsi \
-	dev/acpica dev/agp dev/an dev/bktr dev/ciss dev/filemon dev/firewire \
+	dev/acpica dev/agp dev/an dev/ciss dev/filemon dev/firewire \
 	dev/hwpmc dev/hyperv \
 	dev/ic dev/iicbus dev/io dev/mfi dev/mmc dev/nvme \
 	dev/ofw dev/pbio dev/pci ${_dev_powermac_nvram} dev/ppbus dev/pwm \
@@ -54,9 +53,11 @@ LSUBDIRS=	cam/ata cam/mmc cam/nvme cam/scsi \
 	geom/mirror geom/mountver geom/multipath geom/nop \
 	geom/raid geom/raid3 geom/shsec geom/stripe geom/virstor \
 	net/altq \
+	net/route \
 	netgraph/atm netgraph/netflow \
 	netinet/cc \
 	netinet/netdump \
+	netinet/tcp_stacks \
 	security/audit \
 	security/mac_biba security/mac_bsdextended security/mac_lomac \
 	security/mac_mls security/mac_partition \
@@ -92,7 +93,7 @@ INCS+=		iconv.h
 LSUBDIRS+=	dev/usb
 .endif
 
-.if ${MACHINE_ARCH} == "powerpc" || ${MACHINE_ARCH} == "powerpc64"
+.if ${MACHINE_CPUARCH} == "powerpc" && ${MACHINE_ARCH} != "powerpcspe"
 _dev_powermac_nvram=	dev/powermac_nvram
 .endif
 
@@ -158,7 +159,7 @@ copies: .PHONY .META
 		done; \
 	fi
 .endfor
-.for i in ${LDIRS} ${LSUBDIRS:Ndev/agp:Ndev/acpica:Ndev/bktr:Ndev/evdev:Ndev/hyperv:Ndev/pci:Ndev/veriexec} ${LSUBSUBDIRS}
+.for i in ${LDIRS} ${LSUBDIRS:Ndev/agp:Ndev/acpica:Ndev/evdev:Ndev/hyperv:Ndev/pci:Ndev/veriexec} ${LSUBSUBDIRS}
 	cd ${SRCTOP}/sys; \
 	${INSTALL} -C ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m 444 $i/*.h \
 	    ${SDESTDIR}${INCLUDEDIR}/$i
@@ -171,9 +172,6 @@ copies: .PHONY .META
 	cd ${SRCTOP}/sys/dev/agp; \
 	${INSTALL} -C ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m 444 agpreg.h \
 	    ${SDESTDIR}${INCLUDEDIR}/dev/agp
-	cd ${SRCTOP}/sys/dev/bktr; \
-	${INSTALL} -C ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m 444 ioctl_*.h \
-	    ${SDESTDIR}${INCLUDEDIR}/dev/bktr
 	cd ${SRCTOP}/sys/dev/evdev; \
 	${INSTALL} -C ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m 444 input.h \
 	    ${SDESTDIR}${INCLUDEDIR}/dev/evdev; \
@@ -237,13 +235,16 @@ copies: .PHONY .META
 .endif
 .endfor
 	cd ${SRCTOP}/sys/rpc; \
+	${INSTALL} -C ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m 444 rpcsec_tls.h \
+	    ${SDESTDIR}${INCLUDEDIR}/rpc
+	cd ${SRCTOP}/sys/rpc; \
 	${INSTALL} -C ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m 444 types.h \
 	    ${SDESTDIR}${INCLUDEDIR}/rpc
 	cd ${SRCTOP}/sys/teken; \
 	${INSTALL} -C ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m 444 teken.h \
 	    ${SDESTDIR}${INCLUDEDIR}/teken
 .if ${MK_CDDL} != "no"
-	cd ${SRCTOP}/sys/cddl/contrib/opensolaris/uts/common/sys; \
+	cd ${SRCTOP}/sys/contrib/openzfs/include/sys; \
 	${INSTALL} -C ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m 444 nvpair.h \
 	    ${SDESTDIR}${INCLUDEDIR}/sys
 .endif
@@ -261,7 +262,7 @@ symlinks: .PHONY .META
 		${INSTALL_SYMLINK} ${TAG_ARGS} ../../../sys/$i/$$h ${SDESTDIR}${INCLUDEDIR}/$i; \
 	done
 .endfor
-.for i in ${LSUBDIRS:Ndev/agp:Ndev/acpica:Ndev/bktr:Ndev/evdev:Ndev/hyperv:Ndev/pci:Ndev/veriexec}
+.for i in ${LSUBDIRS:Ndev/agp:Ndev/acpica:Ndev/evdev:Ndev/hyperv:Ndev/pci:Ndev/veriexec}
 	cd ${SRCTOP}/sys/$i; \
 	for h in *.h; do \
 		${INSTALL_SYMLINK} ${TAG_ARGS} ../../../../sys/$i/$$h ${SDESTDIR}${INCLUDEDIR}/$i; \
@@ -276,11 +277,6 @@ symlinks: .PHONY .META
 	for h in agpreg.h; do \
 		${INSTALL_SYMLINK} ${TAG_ARGS} ../../../../sys/dev/agp/$$h \
 		    ${SDESTDIR}${INCLUDEDIR}/dev/agp; \
-	done
-	cd ${SRCTOP}/sys/dev/bktr; \
-	for h in ioctl_*.h; do \
-		${INSTALL_SYMLINK} ${TAG_ARGS} ../../../../sys/dev/bktr/$$h \
-		    ${SDESTDIR}${INCLUDEDIR}/dev/bktr; \
 	done
 	cd ${SRCTOP}/sys/dev/evdev; \
 	for h in input.h input-event-codes.h uinput.h; do \
@@ -375,13 +371,13 @@ symlinks: .PHONY .META
 		    ${SDESTDIR}${INCLUDEDIR}/isofs/cd9660; \
 	done
 	cd ${SRCTOP}/sys/rpc; \
-	for h in types.h; do \
+	for h in rpcsec_tls.h types.h; do \
 		${INSTALL_SYMLINK} ${TAG_ARGS} ../../../sys/rpc/$$h \
 		    ${SDESTDIR}${INCLUDEDIR}/rpc; \
 	done
 .if ${MK_CDDL} != "no"
 	${INSTALL_SYMLINK} ${TAG_ARGS} \
-	    ../../../sys/cddl/contrib/opensolaris/uts/common/sys/nvpair.h \
+	    ../../../sys/contrib/openenzfs/include/sys/nvpair.h \
 	    ${SDESTDIR}${INCLUDEDIR}/sys
 .endif
 .if ${MK_MLX5TOOL} != "no"

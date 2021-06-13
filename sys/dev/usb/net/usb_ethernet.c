@@ -60,7 +60,7 @@ __FBSDID("$FreeBSD$");
 #include <dev/usb/usb_process.h>
 #include <dev/usb/net/usb_ethernet.h>
 
-static SYSCTL_NODE(_net, OID_AUTO, ue, CTLFLAG_RD, 0,
+static SYSCTL_NODE(_net, OID_AUTO, ue, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
     "USB Ethernet parameters");
 
 #define	UE_LOCK(_ue)		mtx_lock((_ue)->ue_mtx)
@@ -274,10 +274,10 @@ ue_attach_post_task(struct usb_proc_msg *_task)
 	snprintf(num, sizeof(num), "%u", ue->ue_unit);
 	ue->ue_sysctl_oid = SYSCTL_ADD_NODE(&ue->ue_sysctl_ctx,
 	    &SYSCTL_NODE_CHILDREN(_net, ue),
-	    OID_AUTO, num, CTLFLAG_RD, NULL, "");
+	    OID_AUTO, num, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "");
 	SYSCTL_ADD_PROC(&ue->ue_sysctl_ctx,
-	    SYSCTL_CHILDREN(ue->ue_sysctl_oid), OID_AUTO,
-	    "%parent", CTLTYPE_STRING | CTLFLAG_RD, ue, 0,
+	    SYSCTL_CHILDREN(ue->ue_sysctl_oid), OID_AUTO, "%parent",
+	    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, ue, 0,
 	    ue_sysctl_parent, "A", "parent device");
 
 	UE_LOCK(ue);
@@ -311,7 +311,6 @@ uether_ifdetach(struct usb_ether *ue)
 	ifp = ue->ue_ifp;
 
 	if (ifp != NULL) {
-
 		/* we are not running any more */
 		UE_LOCK(ue);
 		ifp->if_drv_flags &= ~IFF_DRV_RUNNING;
@@ -645,22 +644,21 @@ void
 uether_rxflush(struct usb_ether *ue)
 {
 	struct ifnet *ifp = ue->ue_ifp;
-	struct mbuf *m;
+	struct epoch_tracker et;
+	struct mbuf *m, *n;
 
 	UE_LOCK_ASSERT(ue, MA_OWNED);
 
-	for (;;) {
-		m = mbufq_dequeue(&ue->ue_rxq);
-		if (m == NULL)
-			break;
-
-		/*
-		 * The USB xfer has been resubmitted so its safe to unlock now.
-		 */
-		UE_UNLOCK(ue);
+	n = mbufq_flush(&ue->ue_rxq);
+	UE_UNLOCK(ue);
+	NET_EPOCH_ENTER(et);
+	while ((m = n) != NULL) {
+		n = STAILQ_NEXT(m, m_stailqpkt);
+		m->m_nextpkt = NULL;
 		ifp->if_input(ifp, m);
-		UE_LOCK(ue);
 	}
+	NET_EPOCH_EXIT(et);
+	UE_LOCK(ue);
 }
 
 /*

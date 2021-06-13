@@ -291,6 +291,7 @@ fuse_io_dispatch(struct vnode *vp, struct uio *uio, int ioflag,
 		fuse_vnode_update(vp, FN_MTIMECHANGE | FN_CTIMECHANGE);
 		if (directio) {
 			off_t start, end, filesize;
+			bool pages = (ioflag & IO_VMIO) != 0;
 
 			SDT_PROBE2(fusefs, , io, trace, 1,
 				"direct write of vnode");
@@ -301,15 +302,14 @@ fuse_io_dispatch(struct vnode *vp, struct uio *uio, int ioflag,
 
 			start = uio->uio_offset;
 			end = start + uio->uio_resid;
-			KASSERT((ioflag & (IO_VMIO | IO_DIRECT)) !=
-				(IO_VMIO | IO_DIRECT),
-			    ("IO_DIRECT used for a cache flush?"));
-			/* Invalidate the write cache when writing directly */
-			err = fuse_inval_buf_range(vp, filesize, start, end);
-			if (err)
-				return (err);
+			if (!pages) {
+				err = fuse_inval_buf_range(vp, filesize, start,
+				    end);
+				if (err)
+					return (err);
+			}
 			err = fuse_write_directbackend(vp, uio, cred, fufh,
-				filesize, ioflag, false);
+				filesize, ioflag, pages);
 		} else {
 			SDT_PROBE2(fusefs, , io, trace, 1,
 				"buffered write of vnode");
@@ -555,9 +555,17 @@ fuse_write_directbackend(struct vnode *vp, struct uio *uio,
 	fdisp_init(&fdi, 0);
 
 	while (uio->uio_resid > 0) {
+		size_t sizeof_fwi;
+
+		if (fuse_libabi_geq(data, 7, 9)) {
+			sizeof_fwi = sizeof(*fwi);
+		} else {
+			sizeof_fwi = FUSE_COMPAT_WRITE_IN_SIZE;
+		}
+
 		chunksize = MIN(uio->uio_resid, data->max_write);
 
-		fdi.iosize = sizeof(*fwi) + chunksize;
+		fdi.iosize = sizeof_fwi + chunksize;
 		fdisp_make_vp(&fdi, FUSE_WRITE, vp, uio->uio_td, cred);
 
 		fwi = fdi.indata;
@@ -567,11 +575,8 @@ fuse_write_directbackend(struct vnode *vp, struct uio *uio,
 		fwi->write_flags = write_flags;
 		if (fuse_libabi_geq(data, 7, 9)) {
 			fwi->flags = fufh_type_2_fflags(fufh->fufh_type);
-			fwi_data = (char *)fdi.indata + sizeof(*fwi);
-		} else {
-			fwi_data = (char *)fdi.indata +
-				FUSE_COMPAT_WRITE_IN_SIZE;
 		}
+		fwi_data = (char *)fdi.indata + sizeof_fwi;
 
 		if ((err = uiomove(fwi_data, chunksize, uio)))
 			break;
@@ -629,7 +634,7 @@ retry:
 				break;
 			} else {
 				/* Resend the unwritten portion of data */
-				fdi.iosize = sizeof(*fwi) + diff;
+				fdi.iosize = sizeof_fwi + diff;
 				/* Refresh fdi without clearing data buffer */
 				fdisp_refresh_vp(&fdi, FUSE_WRITE, vp,
 					uio->uio_td, cred);
@@ -1032,7 +1037,6 @@ fuse_io_strategy(struct vnode *vp, struct buf *bp)
 					"Short read of a dirty file");
 				uiop->uio_resid = 0;
 			}
-
 		}
 		if (error) {
 			bp->b_ioflags |= BIO_ERROR;
@@ -1111,7 +1115,7 @@ fuse_io_invalbuf(struct vnode *vp, struct thread *td)
 	struct fuse_vnode_data *fvdat = VTOFUD(vp);
 	int error = 0;
 
-	if (vp->v_iflag & VI_DOOMED)
+	if (VN_IS_DOOMED(vp))
 		return 0;
 
 	ASSERT_VOP_ELOCKED(vp, "fuse_io_invalbuf");

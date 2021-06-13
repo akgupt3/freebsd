@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2020, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -244,7 +244,6 @@ extern const char                   *AslGbl_SpecialNamedObjects[MAX_SPECIAL_NAME
 #endif
 
 
-
 /*
  * Parser and other externals
  */
@@ -254,6 +253,7 @@ extern int                          DtParserdebug;
 extern int                          PrParserdebug;
 extern const ASL_MAPPING_ENTRY      AslKeywordMapping[];
 extern char                         *AslCompilertext;
+extern char                         *DtCompilerParsertext;
 
 /*
  * Older versions of Bison won't emit this external in the generated header.
@@ -420,6 +420,7 @@ ASL_EXTERN char                     ASL_INIT_GLOBAL (*AslGbl_TableSignature, "NO
 ASL_EXTERN char                     ASL_INIT_GLOBAL (*AslGbl_TableId, "NO_ID");
 ASL_EXTERN ASL_FILE_INFO            ASL_INIT_GLOBAL (*AslGbl_Files, NULL);
 ASL_EXTERN ASL_GLOBAL_FILE_NODE     ASL_INIT_GLOBAL (*AslGbl_FilesList, NULL);
+ASL_EXTERN ASL_EXPECTED_MSG_NODE    ASL_INIT_GLOBAL (*AslGbl_ExpectedErrorCodeList, NULL);
 
 /* Specific to the -q option */
 

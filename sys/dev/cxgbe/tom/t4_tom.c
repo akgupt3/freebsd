@@ -32,6 +32,7 @@ __FBSDID("$FreeBSD$");
 
 #include "opt_inet.h"
 #include "opt_inet6.h"
+#include "opt_kern_tls.h"
 #include "opt_ratelimit.h"
 
 #include <sys/param.h>
@@ -186,6 +187,8 @@ init_toepcb(struct vi_info *vi, struct toepcb *toep)
 	if (ulp_mode(toep) == ULP_MODE_TCPDDP)
 		ddp_init_toep(toep);
 
+	toep->flags |= TPF_INITIALIZED;
+
 	return (0);
 }
 
@@ -209,9 +212,11 @@ free_toepcb(struct toepcb *toep)
 	KASSERT(!(toep->flags & TPF_CPL_PENDING),
 	    ("%s: CPL pending", __func__));
 
-	if (ulp_mode(toep) == ULP_MODE_TCPDDP)
-		ddp_uninit_toep(toep);
-	tls_uninit_toep(toep);
+	if (toep->flags & TPF_INITIALIZED) {
+		if (ulp_mode(toep) == ULP_MODE_TCPDDP)
+			ddp_uninit_toep(toep);
+		tls_uninit_toep(toep);
+	}
 	free(toep, M_CXGBE);
 }
 
@@ -377,6 +382,10 @@ t4_pcb_detach(struct toedev *tod __unused, struct tcpcb *tp)
 	}
 #endif
 
+	if (ulp_mode(toep) == ULP_MODE_TLS)
+		tls_detach(toep);
+
+	tp->tod = NULL;
 	tp->t_toe = NULL;
 	tp->t_flags &= ~TF_TOE;
 	toep->flags &= ~TPF_ATTACHED;
@@ -806,6 +815,20 @@ t4_tcp_info(struct toedev *tod, struct tcpcb *tp, struct tcp_info *ti)
 	fill_tcp_info(sc, toep->tid, ti);
 }
 
+#ifdef KERN_TLS
+static int
+t4_alloc_tls_session(struct toedev *tod, struct tcpcb *tp,
+    struct ktls_session *tls, int direction)
+{
+	struct toepcb *toep = tp->t_toe;
+
+	INP_WLOCK_ASSERT(tp->t_inpcb);
+	MPASS(tls != NULL);
+
+	return (tls_alloc_ktls(toep, tls, direction));
+}
+#endif
+
 /*
  * The TOE driver will not receive any more CPLs for the tid associated with the
  * toepcb; release the hold on the inpcb.
@@ -825,6 +848,8 @@ final_cpl_received(struct toepcb *toep)
 
 	if (ulp_mode(toep) == ULP_MODE_TCPDDP)
 		release_ddp_resources(toep);
+	else if (ulp_mode(toep) == ULP_MODE_TLS)
+		tls_detach(toep);
 	toep->inp = NULL;
 	toep->flags &= ~TPF_CPL_PENDING;
 	mbufq_drain(&toep->ulp_pdu_reclaimq);
@@ -951,7 +976,7 @@ calc_options0(struct vi_info *vi, struct conn_params *cp)
 	MPASS(cp->opt0_bufsize >= 0 && cp->opt0_bufsize <= M_RCV_BUFSIZ);
 	opt0 |= V_RCV_BUFSIZ(cp->opt0_bufsize);
 
-	MPASS(cp->l2t_idx >= 0 && cp->l2t_idx < vi->pi->adapter->vres.l2t.size);
+	MPASS(cp->l2t_idx >= 0 && cp->l2t_idx < vi->adapter->vres.l2t.size);
 	opt0 |= V_L2T_IDX(cp->l2t_idx);
 
 	opt0 |= V_SMAC_SEL(vi->smt_idx);
@@ -1017,8 +1042,6 @@ calc_options2(struct vi_info *vi, struct conn_params *cp)
 	if (cp->ulp_mode == ULP_MODE_TCPDDP)
 		opt2 |= F_RX_FC_DDP;
 #endif
-	if (cp->ulp_mode == ULP_MODE_TLS)
-		opt2 |= F_RX_FC_DISABLE;
 
 	return (htobe32(opt2));
 }
@@ -1026,7 +1049,7 @@ calc_options2(struct vi_info *vi, struct conn_params *cp)
 uint64_t
 select_ntuple(struct vi_info *vi, struct l2t_entry *e)
 {
-	struct adapter *sc = vi->pi->adapter;
+	struct adapter *sc = vi->adapter;
 	struct tp_params *tp = &sc->params.tp;
 	uint64_t ntuple = 0;
 
@@ -1131,7 +1154,7 @@ init_conn_params(struct vi_info *vi , struct offload_settings *s,
 		cp->nagle = tp->t_flags & TF_NODELAY ? 0 : 1;
 
 	/* TCP Keepalive. */
-	if (tcp_always_keepalive || so_options_get(so) & SO_KEEPALIVE)
+	if (V_tcp_always_keepalive || so_options_get(so) & SO_KEEPALIVE)
 		cp->keepalive = 1;
 	else
 		cp->keepalive = 0;
@@ -1353,7 +1376,6 @@ free_tid_tabs(struct tid_info *t)
 {
 
 	free_tid_tab(t);
-	free_atid_tab(t);
 	free_stid_tab(t);
 }
 
@@ -1363,10 +1385,6 @@ alloc_tid_tabs(struct tid_info *t)
 	int rc;
 
 	rc = alloc_tid_tab(t, M_NOWAIT);
-	if (rc != 0)
-		goto failed;
-
-	rc = alloc_atid_tab(t, M_NOWAIT);
 	if (rc != 0)
 		goto failed;
 
@@ -1721,6 +1739,9 @@ t4_tom_activate(struct adapter *sc)
 	tod->tod_offload_socket = t4_offload_socket;
 	tod->tod_ctloutput = t4_ctloutput;
 	tod->tod_tcp_info = t4_tcp_info;
+#ifdef KERN_TLS
+	tod->tod_alloc_tls_session = t4_alloc_tls_session;
+#endif
 
 	for_each_port(sc, i) {
 		for_each_vi(sc->port[i], v, vi) {
@@ -1878,6 +1899,7 @@ t4_tom_mod_unload(void)
 	t4_uninit_listen_cpl_handlers();
 	t4_uninit_cpl_io_handlers();
 	t4_register_shared_cpl_handler(CPL_L2T_WRITE_RPL, NULL, CPL_COOKIE_TOM);
+	t4_register_cpl_handler(CPL_GET_TCB_RPL, NULL);
 
 	return (0);
 }

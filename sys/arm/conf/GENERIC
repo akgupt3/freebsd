@@ -42,6 +42,7 @@ files		"../freescale/imx/files.imx6"
 files		"../mv/files.arm7"
 files		"../nvidia/tegra124/files.tegra124"
 files		"../qemu/files.qemu"
+files		"../rockchip/files.rk32xx"
 files		"../ti/files.ti"
 files		"../ti/am335x/files.am335x"
 files		"../ti/omap4/files.omap4"
@@ -57,6 +58,7 @@ options 	SOC_ALLWINNER_A83T
 options 	SOC_ALLWINNER_H2PLUS
 options 	SOC_ALLWINNER_H3
 options 	SOC_BCM2836
+options 	SOC_BRCM_BCM2837
 options 	SOC_MV_ARMADA38X
 options 	SOC_MV_ARMADAXP
 options		SOC_TI_AM335X
@@ -90,6 +92,7 @@ device		generic_timer
 device		mpcore_timer
 
 # MMC/SD/SDIO Card slot support
+device		dwmmc
 device		sdhci			# SD controller
 device		mmc			# mmc/sd bus
 device		mmcsd			# mmc/sd flash cards
@@ -171,6 +174,7 @@ device		spigen
 device		bcm2835_spi
 device		mv_spi
 device		ti_spi
+device		zy7_qspi		# Xilinx Zynq QSPI controller
 
 # ADC support
 device		ti_adc
@@ -283,6 +287,7 @@ makeoptions	MODULES_EXTRA+="dtb/am335x"
 makeoptions	MODULES_EXTRA+="dtb/imx6"
 makeoptions	MODULES_EXTRA+="dtb/nvidia"
 makeoptions	MODULES_EXTRA+="dtb/omap4"
+makeoptions	MODULES_EXTRA+="dtb/rockchip"
 makeoptions	MODULES_EXTRA+="dtb/rpi"
 makeoptions	MODULES_EXTRA+="dtb/zynq"
 

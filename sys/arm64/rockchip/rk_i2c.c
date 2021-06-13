@@ -46,7 +46,6 @@ __FBSDID("$FreeBSD$");
 
 #include "iicbus_if.h"
 
-
 #define	RK_I2C_CON			0x00
 #define	 RK_I2C_CON_EN			(1 << 0)
 #define	 RK_I2C_CON_MODE_SHIFT		1
@@ -238,7 +237,6 @@ rk_i2c_fill_tx(struct rk_i2c_softc *sc)
 				sc->cnt++;
 			}
 			buf32 |= buf << (j * 8);
-
 		}
 		RK_I2C_WRITE(sc, RK_I2C_TXDATA_BASE + 4 * i, buf32);
 
@@ -530,7 +528,7 @@ rk_i2c_transfer(device_t dev, struct iic_msg *msgs, uint32_t nmsgs)
 				rk_i2c_intr_locked(sc);
 				if (sc->transfer_done != 0)
 					break;
-				DELAY(100);
+				DELAY(1000);
 			}
 			if (timeout <= 0)
 				err = ETIMEDOUT;
@@ -609,8 +607,8 @@ rk_i2c_attach(device_t dev)
 		device_printf(dev, "cannot get pclk clock\n");
 		goto fail;
 	}
-	if (sc->sclk != NULL) {
-		error = clk_enable(sc->sclk);
+	if (sc->pclk != NULL) {
+		error = clk_enable(sc->pclk);
 		if (error != 0) {
 			device_printf(dev, "cannot enable pclk clock\n");
 			goto fail;
@@ -699,5 +697,4 @@ EARLY_DRIVER_MODULE(rk_i2c, simplebus, rk_i2c_driver, rk_i2c_devclass, 0, 0,
 EARLY_DRIVER_MODULE(ofw_iicbus, rk_i2c, ofw_iicbus_driver, ofw_iicbus_devclass,
     0, 0, BUS_PASS_INTERRUPT + BUS_PASS_ORDER_LATE);
 MODULE_DEPEND(rk_i2c, iicbus, 1, 1, 1);
-MODULE_DEPEND(rk_i2c, ofw_iicbus, 1, 1, 1);
 MODULE_VERSION(rk_i2c, 1);

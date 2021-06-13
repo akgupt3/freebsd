@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright (c) 2018 Emmanuel Vadot <manu@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -183,7 +182,7 @@ static int
 pwmc_detach(device_t dev)
 {
 	struct pwmc_softc *sc;
- 
+
 	sc = device_get_softc(dev);
 	destroy_dev(sc->cdev);
 

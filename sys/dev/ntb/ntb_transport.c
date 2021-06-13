@@ -67,7 +67,9 @@ __FBSDID("$FreeBSD$");
 
 #define NTB_TRANSPORT_VERSION	4
 
-static SYSCTL_NODE(_hw, OID_AUTO, ntb_transport, CTLFLAG_RW, 0, "ntb_transport");
+static SYSCTL_NODE(_hw, OID_AUTO, ntb_transport,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "ntb_transport");
 
 static unsigned g_ntb_transport_debug_level;
 SYSCTL_UINT(_hw_ntb_transport, OID_AUTO, debug_level, CTLFLAG_RWTUN,
@@ -203,6 +205,7 @@ struct ntb_transport_ctx {
 	struct ntb_transport_child *child;
 	struct ntb_transport_mw	*mw_vec;
 	struct ntb_transport_qp	*qp_vec;
+	int			compact;
 	unsigned		mw_count;
 	unsigned		qp_count;
 	uint64_t		qp_bitmap;
@@ -250,6 +253,15 @@ enum {
 	 * work around this watchdog.
 	 */
 	NTBT_WATCHDOG_SPAD = 15
+};
+
+/*
+ * Compart version of sratchpad protocol, using twice less registers.
+ */
+enum {
+	NTBTC_PARAMS = 0,	/* NUM_QPS << 24 + NUM_MWS << 16 + VERSION */
+	NTBTC_QP_LINKS,		/* QP links status */
+	NTBTC_MW0_SZ,		/* MW size limited to 32 bits. */
 };
 
 #define QP_TO_MW(nt, qp)	((qp) % nt->mw_count)
@@ -345,21 +357,37 @@ ntb_transport_attach(device_t dev)
 	spad_count = ntb_spad_count(dev);
 	db_bitmap = ntb_db_valid_mask(dev);
 	db_count = flsll(db_bitmap);
-	KASSERT(db_bitmap == (1 << db_count) - 1,
+	KASSERT(db_bitmap == ((uint64_t)1 << db_count) - 1,
 	    ("Doorbells are not sequential (%jx).\n", db_bitmap));
 
 	if (nt->mw_count == 0) {
 		device_printf(dev, "At least 1 memory window required.\n");
 		return (ENXIO);
 	}
-	if (spad_count < 6) {
-		device_printf(dev, "At least 6 scratchpads required.\n");
-		return (ENXIO);
-	}
-	if (spad_count < 4 + 2 * nt->mw_count) {
-		nt->mw_count = (spad_count - 4) / 2;
-		device_printf(dev, "Scratchpads enough only for %d "
-		    "memory windows.\n", nt->mw_count);
+	nt->compact = (spad_count < 4 + 2 * nt->mw_count);
+	snprintf(buf, sizeof(buf), "hint.%s.%d.compact", device_get_name(dev),
+	    device_get_unit(dev));
+	TUNABLE_INT_FETCH(buf, &nt->compact);
+	if (nt->compact) {
+		if (spad_count < 3) {
+			device_printf(dev, "At least 3 scratchpads required.\n");
+			return (ENXIO);
+		}
+		if (spad_count < 2 + nt->mw_count) {
+			nt->mw_count = spad_count - 2;
+			device_printf(dev, "Scratchpads enough only for %d "
+			    "memory windows.\n", nt->mw_count);
+		}
+	} else {
+		if (spad_count < 6) {
+			device_printf(dev, "At least 6 scratchpads required.\n");
+			return (ENXIO);
+		}
+		if (spad_count < 4 + 2 * nt->mw_count) {
+			nt->mw_count = (spad_count - 4) / 2;
+			device_printf(dev, "Scratchpads enough only for %d "
+			    "memory windows.\n", nt->mw_count);
+		}
 	}
 	if (db_bitmap == 0) {
 		device_printf(dev, "At least one doorbell required.\n");
@@ -380,9 +408,15 @@ ntb_transport_attach(device_t dev)
 		mw->tx_size = mw->phys_size;
 		if (max_mw_size != 0 && mw->tx_size > max_mw_size) {
 			device_printf(dev, "Memory window %d limited from "
-			    "%ju to %ju\n", i, (uintmax_t)mw->phys_size,
+			    "%ju to %ju\n", i, (uintmax_t)mw->tx_size,
 			    max_mw_size);
 			mw->tx_size = max_mw_size;
+		}
+		if (nt->compact && mw->tx_size > UINT32_MAX) {
+			device_printf(dev, "Memory window %d is too big "
+			    "(%ju)\n", i, (uintmax_t)mw->tx_size);
+			rc = ENXIO;
+			goto err;
 		}
 
 		mw->rx_size = 0;
@@ -722,8 +756,6 @@ ntb_transport_link_up(struct ntb_transport_qp *qp)
 	if (nt->link_is_up)
 		callout_reset(&qp->link_work, 0, ntb_qp_link_work, qp);
 }
-
-
 
 /* Transport Tx */
 
@@ -1110,43 +1142,66 @@ ntb_transport_link_work(void *arg)
 	int rc;
 
 	/* send the local info, in the opposite order of the way we read it */
-	for (i = 0; i < nt->mw_count; i++) {
-		size = nt->mw_vec[i].tx_size;
-		ntb_peer_spad_write(dev, NTBT_MW0_SZ_HIGH + (i * 2),
-		    size >> 32);
-		ntb_peer_spad_write(dev, NTBT_MW0_SZ_LOW + (i * 2), size);
+	if (nt->compact) {
+		for (i = 0; i < nt->mw_count; i++) {
+			size = nt->mw_vec[i].tx_size;
+			KASSERT(size <= UINT32_MAX, ("size too big (%jx)", size));
+			ntb_peer_spad_write(dev, NTBTC_MW0_SZ + i, size);
+		}
+		ntb_peer_spad_write(dev, NTBTC_QP_LINKS, 0);
+		ntb_peer_spad_write(dev, NTBTC_PARAMS,
+		    (nt->qp_count << 24) | (nt->mw_count << 16) |
+		    NTB_TRANSPORT_VERSION);
+	} else {
+		for (i = 0; i < nt->mw_count; i++) {
+			size = nt->mw_vec[i].tx_size;
+			ntb_peer_spad_write(dev, NTBT_MW0_SZ_HIGH + (i * 2),
+			    size >> 32);
+			ntb_peer_spad_write(dev, NTBT_MW0_SZ_LOW + (i * 2), size);
+		}
+		ntb_peer_spad_write(dev, NTBT_NUM_MWS, nt->mw_count);
+		ntb_peer_spad_write(dev, NTBT_NUM_QPS, nt->qp_count);
+		ntb_peer_spad_write(dev, NTBT_QP_LINKS, 0);
+		ntb_peer_spad_write(dev, NTBT_VERSION, NTB_TRANSPORT_VERSION);
 	}
-	ntb_peer_spad_write(dev, NTBT_NUM_MWS, nt->mw_count);
-	ntb_peer_spad_write(dev, NTBT_NUM_QPS, nt->qp_count);
-	ntb_peer_spad_write(dev, NTBT_QP_LINKS, 0);
-	ntb_peer_spad_write(dev, NTBT_VERSION, NTB_TRANSPORT_VERSION);
 
 	/* Query the remote side for its info */
 	val = 0;
-	ntb_spad_read(dev, NTBT_VERSION, &val);
-	if (val != NTB_TRANSPORT_VERSION)
-		goto out;
+	if (nt->compact) {
+		ntb_spad_read(dev, NTBTC_PARAMS, &val);
+		if (val != ((nt->qp_count << 24) | (nt->mw_count << 16) |
+		    NTB_TRANSPORT_VERSION))
+			goto out;
+	} else {
+		ntb_spad_read(dev, NTBT_VERSION, &val);
+		if (val != NTB_TRANSPORT_VERSION)
+			goto out;
 
-	ntb_spad_read(dev, NTBT_NUM_QPS, &val);
-	if (val != nt->qp_count)
-		goto out;
+		ntb_spad_read(dev, NTBT_NUM_QPS, &val);
+		if (val != nt->qp_count)
+			goto out;
 
-	ntb_spad_read(dev, NTBT_NUM_MWS, &val);
-	if (val != nt->mw_count)
-		goto out;
+		ntb_spad_read(dev, NTBT_NUM_MWS, &val);
+		if (val != nt->mw_count)
+			goto out;
+	}
 
 	for (i = 0; i < nt->mw_count; i++) {
-		ntb_spad_read(dev, NTBT_MW0_SZ_HIGH + (i * 2), &val);
-		val64 = (uint64_t)val << 32;
+		if (nt->compact) {
+			ntb_spad_read(dev, NTBTC_MW0_SZ + i, &val);
+			val64 = val;
+		} else {
+			ntb_spad_read(dev, NTBT_MW0_SZ_HIGH + (i * 2), &val);
+			val64 = (uint64_t)val << 32;
 
-		ntb_spad_read(dev, NTBT_MW0_SZ_LOW + (i * 2), &val);
-		val64 |= val;
+			ntb_spad_read(dev, NTBT_MW0_SZ_LOW + (i * 2), &val);
+			val64 |= val;
+		}
 
 		mw = &nt->mw_vec[i];
 		mw->rx_size = val64;
 		val64 = roundup(val64, mw->xlat_align_size);
 		if (mw->buff_size != val64) {
-
 			rc = ntb_set_mw(nt, i, val64);
 			if (rc != 0) {
 				ntb_printf(0, "link up set mw%d fails, rc %d\n",
@@ -1534,7 +1589,6 @@ ntb_send_link_down(struct ntb_transport_qp *qp)
 
 	ntb_qp_link_down_reset(qp);
 }
-
 
 /* List Management */
 

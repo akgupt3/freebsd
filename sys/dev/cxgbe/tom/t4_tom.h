@@ -72,6 +72,10 @@ enum {
 	TPF_SYNQE	   = (1 << 8),	/* synq_entry, not really a toepcb */
 	TPF_SYNQE_EXPANDED = (1 << 9),	/* toepcb ready, tid context updated */
 	TPF_FORCE_CREDITS  = (1 << 10), /* always send credits */
+	TPF_KTLS           = (1 << 11), /* send TLS records from KTLS */
+	TPF_INITIALIZED    = (1 << 12), /* init_toepcb has been called */
+	TPF_TLS_RECEIVE	   = (1 << 13), /* should receive TLS records */
+	TPF_TLS_ESTABLISHED = (1 << 14), /* TLS handshake timer initialized */
 };
 
 enum {
@@ -174,11 +178,11 @@ struct ddp_pcb {
 };
 
 struct toepcb {
-	TAILQ_ENTRY(toepcb) link; /* toep_list */
-	u_int flags;		/* miscellaneous flags */
-	int refcount;
 	struct tom_data *td;
 	struct inpcb *inp;	/* backpointer to host stack's PCB */
+	u_int flags;		/* miscellaneous flags */
+	TAILQ_ENTRY(toepcb) link; /* toep_list */
+	int refcount;
 	struct vnet *vnet;
 	struct vi_info *vi;	/* virtual interface */
 	struct sge_wrq *ofld_txq;
@@ -240,6 +244,7 @@ struct synq_entry {
 	uint32_t iss;
 	uint32_t irs;
 	uint32_t ts;
+	uint32_t rss_hash;
 	__be16 tcp_opt; /* from cpl_pass_establish */
 	struct toepcb *toep;
 
@@ -367,7 +372,7 @@ int add_tid_to_history(struct adapter *, u_int);
 /* t4_connect.c */
 void t4_init_connect_cpl_handlers(void);
 void t4_uninit_connect_cpl_handlers(void);
-int t4_connect(struct toedev *, struct socket *, struct rtentry *,
+int t4_connect(struct toedev *, struct socket *, struct nhop_object *,
     struct sockaddr *);
 void act_open_failure_cleanup(struct adapter *, u_int, u_int);
 
@@ -438,15 +443,19 @@ const struct offload_settings *lookup_offload_policy(struct adapter *, int,
 
 /* t4_tls.c */
 bool can_tls_offload(struct adapter *);
+void do_rx_data_tls(const struct cpl_rx_data *, struct toepcb *, struct mbuf *);
 int t4_ctloutput_tls(struct socket *, struct sockopt *);
 void t4_push_tls_records(struct adapter *, struct toepcb *, int);
+void t4_push_ktls(struct adapter *, struct toepcb *, int);
 void t4_tls_mod_load(void);
 void t4_tls_mod_unload(void);
+void tls_detach(struct toepcb *);
 void tls_establish(struct toepcb *);
 void tls_init_toep(struct toepcb *);
 int tls_rx_key(struct toepcb *);
 void tls_stop_handshake_timer(struct toepcb *);
 int tls_tx_key(struct toepcb *);
 void tls_uninit_toep(struct toepcb *);
+int tls_alloc_ktls(struct toepcb *, struct ktls_session *, int);
 
 #endif

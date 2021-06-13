@@ -39,6 +39,7 @@ options 	SOC_ALLWINNER_H5
 options 	SOC_CAVM_THUNDERX
 options 	SOC_HISI_HI6220
 options 	SOC_BRCM_BCM2837
+options 	SOC_BRCM_BCM2838
 options 	SOC_MARVELL_8K
 options 	SOC_ROCKCHIP_RK3328
 options 	SOC_ROCKCHIP_RK3399
@@ -75,13 +76,15 @@ options 	PCI_IOV		# PCI SR-IOV support
 # Ethernet NICs
 device		mdio
 device		awg		# Allwinner EMAC Gigabit Ethernet
-device		axgbe		# AMD Opteron A1100 integrated NIC
+device		axa		# AMD Opteron A1100 integrated NIC
 device		neta		# Marvell Armada 370/38x/XP/3700 NIC
 device  	smc		# SMSC LAN91C111
 device		vnic		# Cavium ThunderX NIC
 device		al_eth		# Annapurna Alpine Ethernet NIC
 device		dwc_rk		# Rockchip Designware
 device		dwc_socfpga	# Altera SOCFPGA Ethernet MAC
+device		ice		# Intel 800 Series Physical Function
+device		ice_ddp		# Intel 800 Series DDP Package
 
 # Etherswitch devices
 device		e6000sw		# Marvell mv88e6085 based switches
@@ -107,7 +110,6 @@ device		uart_snps
 device		pl011
 
 # USB support
-device		aw_ehci			# Allwinner EHCI USB interface (USB 2.0)
 device		aw_usbphy		# Allwinner USB PHY
 device		dwcotg			# DWC OTG controller
 device		ehci_mv			# Marvell EHCI USB interface
@@ -189,6 +191,13 @@ device		regulator
 device		syscon
 device		aw_syscon
 
+# Backlight subsystem
+device		backlight
+
+# Misc devices.
+device		pl330		# ARM PL330 dma controller
+device		xdma		# xDMA framework for SoC on-chip dma controllers
+
 # Chip-specific errata
 options 	THUNDERX_PASS_1_1_ERRATA
 
@@ -225,3 +234,8 @@ nooptions 	COMPAT_FREEBSD10
 
 # arm64 supports 32-bit FreeBSD/arm binaries (armv[67] ABIs)
 options 	COMPAT_FREEBSD32	# Compatible with FreeBSD/arm
+
+#####################################################################
+# ZFS support
+
+options		ZFS

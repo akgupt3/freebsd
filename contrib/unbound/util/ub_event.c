@@ -148,7 +148,7 @@ const char* ub_event_get_version(void)
 	return event_get_version();
 }
 
-#if (defined(HAVE_EV_LOOP) || defined(HAVE_EV_DEFAULT_LOOP)) && defined(EVBACKEND_SELECT)
+#if (defined(HAVE_EV_LOOP) || defined(HAVE_EV_DEFAULT_LOOP)) && defined(EV_FEATURE_BACKENDS)
 static const char* ub_ev_backend2str(int b)
 {
 	switch(b) {
@@ -184,7 +184,7 @@ ub_get_event_sys(struct ub_event_base* base, const char** n, const char** s,
 	*n = "libev";
 	if (!b)
 		b = (struct event_base*)ev_default_loop(EVFLAG_AUTO);
-#    ifdef EVBACKEND_SELECT
+#    ifdef EV_FEATURE_BACKENDS
 	*m = ub_ev_backend2str(ev_backend((struct ev_loop*)b));
 #    else
 	*m = "not obtainable";
@@ -458,7 +458,9 @@ void ub_comm_base_now(struct comm_base* cb)
 	if(gettimeofday(tv, NULL) < 0) {
 		log_err("gettimeofday: %s", strerror(errno));
 	}
+#ifndef S_SPLINT_S
 	*tt = tv->tv_sec;
+#endif
 #endif /* USE_MINI_EVENT */
 }
 

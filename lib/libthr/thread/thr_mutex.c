@@ -384,6 +384,8 @@ __Tthr_mutex_init(pthread_mutex_t * __restrict mutex,
 	struct pthread_mutex *pmtx;
 	int ret;
 
+	_thr_check_init();
+
 	if (mutex_attr != NULL) {
 		ret = mutex_check_attr(*mutex_attr);
 		if (ret != 0)
@@ -474,7 +476,11 @@ _thr_mutex_destroy(pthread_mutex_t *mutex)
 		if (m == THR_PSHARED_PTR) {
 			m1 = __thr_pshared_offpage(mutex, 0);
 			if (m1 != NULL) {
-				mutex_assert_not_owned(_get_curthread(), m1);
+				if ((uint32_t)m1->m_lock.m_owner !=
+				    UMUTEX_RB_OWNERDEAD) {
+					mutex_assert_not_owned(
+					    _get_curthread(), m1);
+				}
 				__thr_pshared_destroy(mutex);
 			}
 			*mutex = THR_MUTEX_DESTROYED;

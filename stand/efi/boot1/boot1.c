@@ -53,42 +53,8 @@ static EFI_GUID DevicePathGUID = DEVICE_PATH_PROTOCOL;
 static EFI_GUID LoadedImageGUID = LOADED_IMAGE_PROTOCOL;
 static EFI_GUID ConsoleControlGUID = EFI_CONSOLE_CONTROL_PROTOCOL_GUID;
 
-/*
- * Provide Malloc / Free / Calloc backed by EFIs AllocatePool / FreePool which ensures
- * memory is correctly aligned avoiding EFI_INVALID_PARAMETER returns from
- * EFI methods.
- */
-
-void *
-Malloc(size_t len, const char *file __unused, int line __unused)
-{
-	void *out;
-
-	if (BS->AllocatePool(EfiLoaderData, len, &out) == EFI_SUCCESS)
-		return (out);
-
-	return (NULL);
-}
-
-void
-Free(void *buf, const char *file __unused, int line __unused)
-{
-	if (buf != NULL)
-		(void)BS->FreePool(buf);
-}
-
-void *
-Calloc(size_t n1, size_t n2, const char *file, int line)
-{
-	size_t bytes;
-	void *res;
-
-	bytes = n1 * n2;
-	if ((res = Malloc(bytes, file, line)) != NULL)
-		bzero(res, bytes);
-
-	return (res);
-}
+static EFI_PHYSICAL_ADDRESS heap;
+static UINTN heapsize;
 
 /*
  * try_boot only returns if it fails to load the loader. If it succeeds
@@ -201,6 +167,18 @@ efi_main(EFI_HANDLE Ximage, EFI_SYSTEM_TABLE *Xsystab)
 	BS = ST->BootServices;
 	RS = ST->RuntimeServices;
 
+	heapsize = 64 * 1024 * 1024;
+	status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData,
+	    EFI_SIZE_TO_PAGES(heapsize), &heap);
+	if (status != EFI_SUCCESS) {
+		ST->ConOut->OutputString(ST->ConOut,
+		    __DECONST(CHAR16 *,
+		    L"Failed to allocate memory for heap.\r\n"));
+		BS->Exit(IH, status, 0, NULL);
+	}
+
+	setheap((void *)(uintptr_t)heap, (void *)(uintptr_t)(heap + heapsize));
+
 	/* Set up the console, so printf works. */
 	status = BS->LocateProtocol(&ConsoleControlGUID, NULL,
 	    (VOID **)&ConsoleControl);
@@ -293,6 +271,20 @@ add_device(dev_info_t **devinfop, dev_info_t *devinfo)
 	dev->next = devinfo;
 }
 
+void
+efi_exit(EFI_STATUS s)
+{
+
+	BS->FreePages(heap, EFI_SIZE_TO_PAGES(heapsize));
+	BS->Exit(IH, s, 0, NULL);
+}
+
+void
+exit(int error __unused)
+{
+	efi_exit(EFI_LOAD_ERROR);
+}
+
 /*
  * OK. We totally give up. Exit back to EFI with a sensible status so
  * it can try the next option on the list.
@@ -308,7 +300,12 @@ efi_panic(EFI_STATUS s, const char *fmt, ...)
 	va_end(ap);
 	printf("\n");
 
-	BS->Exit(IH, s, 0, NULL);
+	efi_exit(s);
+}
+
+int getchar(void)
+{
+	return (-1);
 }
 
 void

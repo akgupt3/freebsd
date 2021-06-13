@@ -12,6 +12,8 @@
         ..
         chmod
         ..
+        cp
+        ..
         date
         ..
         dd
@@ -384,6 +386,8 @@
         ..
         libdevdctl
         ..
+        libexecinfo
+        ..
         libkvm
         ..
         libmp
@@ -436,13 +440,15 @@
         ..
         mdconfig
         ..
+        nvmecontrol
+        ..
         pfctl
             files
             ..
         ..
         ping
         ..
-        ping6
+        route
         ..
     ..
     secure
@@ -752,6 +758,8 @@
                 ..
                 mirror
                 ..
+                multipath
+                ..
                 nop
                 ..
                 part
@@ -790,14 +798,20 @@
         ..
         net
         ..
+        netgraph
+        ..
         netinet
+        ..
+        netinet6
+            frag6
+            ..
         ..
         netipsec
             tunnel
             ..
         ..
-    netmap
-    ..
+        netmap
+        ..
         netpfil
             common
             ..
@@ -990,6 +1004,8 @@
         ..
         getconf
         ..
+        gh-bc
+        ..
         grep
         ..
         gzip
@@ -1009,6 +1025,8 @@
         lastcomm
         ..
         limits
+        ..
+        locale
         ..
         m4
         ..
@@ -1056,6 +1074,8 @@
         ..
         uuencode
         ..
+        unifdef
+        ..
         uniq
         ..
         vmstat
@@ -1079,6 +1099,8 @@
         extattr
         ..
         fstyp
+        ..
+        jail
         ..
         makefs
         ..

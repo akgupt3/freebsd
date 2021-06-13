@@ -72,11 +72,6 @@ extern "C" {
 #endif
 #include "efx_types.h"
 
-/* Common code requires this */
-#if __FreeBSD_version < 800068
-#define	memmove(d, s, l) bcopy(s, d, l)
-#endif
-
 #ifndef B_FALSE
 #define	B_FALSE	FALSE
 #endif
@@ -88,7 +83,7 @@ extern "C" {
 #define	ISP2(x)			(((x) & ((x) - 1)) == 0)
 #endif
 
-#if defined(__x86_64__) && __FreeBSD_version >= 1000000
+#if defined(__x86_64__)
 
 #define	SFXGE_USE_BUS_SPACE_8		1
 
@@ -130,26 +125,6 @@ prefetch_read_once(void *addr)
 	    :
 	    : "r" (addr));
 }
-#elif defined(__sparc64__)
-static __inline void
-prefetch_read_many(void *addr)
-{
-
-	__asm__(
-	    "prefetch [%0], 0"
-	    :
-	    : "r" (addr));
-}
-
-static __inline void
-prefetch_read_once(void *addr)
-{
-
-	__asm__(
-	    "prefetch [%0], 1"
-	    :
-	    : "r" (addr));
-}
 #else
 static __inline void
 prefetch_read_many(void *addr)
@@ -183,7 +158,6 @@ sfxge_map_mbuf_fast(bus_dma_tag_t tag, bus_dmamap_t map,
 }
 
 /* Code inclusion options */
-
 
 #define	EFSYS_OPT_NAMES 1
 
@@ -357,7 +331,6 @@ typedef struct efsys_mem_s {
 
 #define	EFSYS_MEM_IS_NULL(_esmp)					\
 	((_esmp)->esm_base == NULL)
-
 
 #define	EFSYS_MEM_ZERO(_esmp, _size)					\
 	do {								\

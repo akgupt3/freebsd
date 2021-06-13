@@ -32,7 +32,9 @@
 
 extern "C" {
 #include <dirent.h>
+
 #include <fcntl.h>
+#include <semaphore.h>
 }
 
 #include "mockfs.hh"
@@ -82,12 +84,21 @@ TEST_F(Opendir, enoent)
 	const char FULLPATH[] = "mountpoint/some_dir";
 	const char RELPATH[] = "some_dir";
 	uint64_t ino = 42;
+	sem_t sem;
+
+	ASSERT_EQ(0, sem_init(&sem, 0, 0)) << strerror(errno);
 
 	expect_lookup(RELPATH, ino);
 	expect_opendir(ino, O_RDONLY, ReturnErrno(ENOENT));
+	// Since FUSE_OPENDIR returns ENOENT, the kernel will reclaim the vnode
+	// and send a FUSE_FORGET
+	expect_forget(ino, 1, &sem);
 
-	EXPECT_NE(0, open(FULLPATH, O_DIRECTORY));
+	ASSERT_EQ(-1, open(FULLPATH, O_DIRECTORY));
 	EXPECT_EQ(ENOENT, errno);
+
+	sem_wait(&sem);
+	sem_destroy(&sem);
 }
 
 /* 
@@ -103,7 +114,7 @@ TEST_F(Opendir, eperm)
 	expect_lookup(RELPATH, ino);
 	expect_opendir(ino, O_RDONLY, ReturnErrno(EPERM));
 
-	EXPECT_NE(0, open(FULLPATH, O_DIRECTORY));
+	EXPECT_EQ(-1, open(FULLPATH, O_DIRECTORY));
 	EXPECT_EQ(EPERM, errno);
 }
 
@@ -112,6 +123,7 @@ TEST_F(Opendir, open)
 	const char FULLPATH[] = "mountpoint/some_dir";
 	const char RELPATH[] = "some_dir";
 	uint64_t ino = 42;
+	int fd;
 
 	expect_lookup(RELPATH, ino);
 	expect_opendir(ino, O_RDONLY,
@@ -119,7 +131,10 @@ TEST_F(Opendir, open)
 		SET_OUT_HEADER_LEN(out, open);
 	}));
 
-	EXPECT_LE(0, open(FULLPATH, O_DIRECTORY)) << strerror(errno);
+	fd = open(FULLPATH, O_DIRECTORY);
+	ASSERT_LE(0, fd) << strerror(errno);
+
+	leak(fd);
 }
 
 /* Directories can be opened O_EXEC for stuff like fchdir(2) */
@@ -138,6 +153,8 @@ TEST_F(Opendir, open_exec)
 
 	fd = open(FULLPATH, O_EXEC | O_DIRECTORY);
 	ASSERT_LE(0, fd) << strerror(errno);
+
+	leak(fd);
 }
 
 TEST_F(Opendir, opendir)

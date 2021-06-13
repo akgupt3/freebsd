@@ -39,6 +39,7 @@ __FBSDID("$FreeBSD$");
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sysexits.h>
 #include <unistd.h>
 
 #include "nvmecontrol.h"
@@ -158,16 +159,18 @@ static void
 passthru(const struct cmd *f, int argc, char *argv[])
 {
 	int	fd = -1, ifd = -1;
+	size_t	bytes_read;
 	void	*data = NULL, *metadata = NULL;
 	struct nvme_pt_command	pt;
 
-	arg_parse(argc, argv, f);
-	open_dev(argv[optind], &fd, 1, 1);
+	if (arg_parse(argc, argv, f))
+		return;
+	open_dev(opt.dev, &fd, 1, 1);
 
 	if (opt.read && opt.write)
-		errx(1, "need exactly one of --read or --write");
+		errx(EX_USAGE, "need exactly one of --read or --write");
 	if (opt.data_len != 0 && !opt.read && !opt.write)
-		errx(1, "need exactly one of --read or --write");
+		errx(EX_USAGE, "need exactly one of --read or --write");
 	if (*opt.ifn && (ifd = open(opt.ifn, O_RDONLY)) == -1) {
 		warn("open %s", opt.ifn);
 		goto cleanup;
@@ -181,7 +184,7 @@ passthru(const struct cmd *f, int argc, char *argv[])
 	}
 #else
 	if (opt.metadata_len != 0)
-		errx(1, "metadata not supported on FreeBSD");
+		errx(EX_UNAVAILABLE, "metadata not supported on FreeBSD");
 #endif
 	if (opt.data_len) {
 		if (posix_memalign(&data, getpagesize(), opt.data_len)) {
@@ -189,8 +192,12 @@ passthru(const struct cmd *f, int argc, char *argv[])
 			goto cleanup;
 		}
 		memset(data, opt.prefill, opt.data_len);
-		if (opt.write && read(ifd, data, opt.data_len) < 0) {
-			warn("read %s", *opt.ifn ? opt.ifn : "stdin");
+		if (opt.write &&
+		    (bytes_read = read(ifd, data, opt.data_len)) !=
+		    opt.data_len) {
+			warn("read %s; expected %u bytes; got %zd",
+			     *opt.ifn ? opt.ifn : "stdin",
+			     opt.data_len, bytes_read);
 			goto cleanup;
 		}
 	}
@@ -238,7 +245,7 @@ passthru(const struct cmd *f, int argc, char *argv[])
 
 	errno = 0;
 	if (ioctl(fd, NVME_PASSTHROUGH_CMD, &pt) < 0)
-		err(1, "passthrough request failed");
+		err(EX_IOERR, "passthrough request failed");
 	/* XXX report status */
 	if (opt.read) {
 		if (opt.binary)
@@ -249,8 +256,12 @@ passthru(const struct cmd *f, int argc, char *argv[])
 		}
 	}
 cleanup:
+	free(data);
+	close(fd);
+	if (ifd > -1)
+		close(ifd);
 	if (errno)
-		exit(1);
+		exit(EX_IOERR);
 }
 
 static void
@@ -282,7 +293,7 @@ static struct cmd io_pass_cmd = {
 	.ctx_size = sizeof(struct options),
 	.opts = opts,
 	.args = args,
-	.descr = "Send a pass through Admin command to the specified device",
+	.descr = "Send a pass through I/O command to the specified device",
 };
 
 CMD_COMMAND(admin_pass_cmd);

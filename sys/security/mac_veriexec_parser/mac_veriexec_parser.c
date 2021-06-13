@@ -233,7 +233,6 @@ verify_digest(const char *data, size_t len, const unsigned char *expected_hash)
 	return (memcmp(expected_hash, hash, SHA256_DIGEST_LENGTH));
 }
 
-
 static int
 open_file(const char *path, struct nameidata *nid)
 {
@@ -291,7 +290,7 @@ read_manifest(char *path, unsigned char *digest)
 
 	data[bytes_read] = '\0';
 
-	VOP_UNLOCK(nid.ni_vp, 0);
+	VOP_UNLOCK(nid.ni_vp);
 	(void)vn_close(nid.ni_vp, FREAD, curthread->td_ucred, curthread);
 
 	/*
@@ -370,7 +369,7 @@ parse_entry(char *entry, char *prefix)
 	mtx_unlock(&ve_mutex);
 
 out:
-	VOP_UNLOCK(nid.ni_vp, 0);
+	VOP_UNLOCK(nid.ni_vp);
 	vn_close(nid.ni_vp, FREAD, curthread->td_ucred, curthread);
 	return (rc);
 }

@@ -47,6 +47,7 @@
 #include <machine/asmacros.h>
 #include <machine/trap.h>
 #include <machine/specialreg.h>
+#include <machine/pmap.h>
 
 #ifdef KDTRACE_HOOKS
 	.bss
@@ -345,10 +346,13 @@ IDTVEC(dblfault)
 	pushfq
 	andq	$~(PSL_D | PSL_AC),(%rsp)
 	popfq
-	testb	$SEL_RPL_MASK,TF_CS(%rsp) /* Did we come from kernel? */
-	jz	1f			/* already running with kernel GS.base */
-	swapgs
-1:	lfence
+	movq	TF_SIZE(%rsp),%rdx
+	movl	%edx,%eax
+	shrq	$32,%rdx
+	movl	$MSR_GSBASE,%ecx
+	wrmsr
+	movq	%cr3,%rax
+	movq	%rax,PCPU(SAVED_UCR3)
 	movq	PCPU(KCR3),%rax
 	cmpq	$~0,%rax
 	je	2f
@@ -495,8 +499,8 @@ prot_addrf:
 3:	cmpw	$KUG32SEL,TF_GS(%rsp)
 	jne	4f
 	movq	%rdx,PCB_GSBASE(%rdi)
+	orl	$PCB_FULL_IRET,PCB_FLAGS(%rdi)	/* full iret from user #gp */
 4:	call	handle_ibrs_entry
-	orl	$PCB_FULL_IRET,PCB_FLAGS(%rdi)	/* always full iret from GPF */
 	movw	%es,TF_ES(%rsp)
 	movw	%ds,TF_DS(%rsp)
 	testl	$PSL_I,TF_RFLAGS(%rsp)
@@ -522,17 +526,17 @@ prot_addrf:
 IDTVEC(fast_syscall_pti)
 	swapgs
 	lfence
-	movq	%rax,PCPU(SCRATCH_RAX)
 	cmpq	$~0,PCPU(UCR3)
 	je	fast_syscall_common
+	movq	%rax,PCPU(SCRATCH_RAX)
 	movq	PCPU(KCR3),%rax
 	movq	%rax,%cr3
+	movq	PCPU(SCRATCH_RAX),%rax
 	jmp	fast_syscall_common
 	SUPERALIGN_TEXT
 IDTVEC(fast_syscall)
 	swapgs
 	lfence
-	movq	%rax,PCPU(SCRATCH_RAX)
 fast_syscall_common:
 	movq	%rsp,PCPU(SCRATCH_RSP)
 	movq	PCPU(RSP0),%rsp
@@ -543,7 +547,6 @@ fast_syscall_common:
 	movq	%rcx,TF_RIP(%rsp)	/* %rcx original value is in %r10 */
 	movq	PCPU(SCRATCH_RSP),%r11	/* %r11 already saved */
 	movq	%r11,TF_RSP(%rsp)	/* user stack pointer */
-	movq	PCPU(SCRATCH_RAX),%rax
 	/*
 	 * Save a few arg registers early to free them for use in
 	 * handle_ibrs_entry().  %r10 is especially tricky.  It is not an
@@ -604,8 +607,10 @@ fast_syscall_common:
 	cmpq	$~0,PCPU(UCR3)
 	je	2f
 	movq	PCPU(UCR3),%r9
+	andq	PCPU(UCR3_LOAD_MASK),%r9
 	movq	%r9,%cr3
 2:	xorl	%r9d,%r9d
+	movq	$PMAP_UCR3_NOMASK,PCPU(UCR3_LOAD_MASK)
 	swapgs
 	sysretq
 
@@ -1259,6 +1264,8 @@ ld_regs:
 	movq	TF_SS(%rsp),%rax
 	movq	%rax,PTI_SS(%rdx)
 	movq	PCPU(UCR3),%rax
+	andq	PCPU(UCR3_LOAD_MASK),%rax
+	movq	$PMAP_UCR3_NOMASK,PCPU(UCR3_LOAD_MASK)
 	swapgs
 	movq	%rdx,%rsp
 	movq	%rax,%cr3

@@ -216,6 +216,7 @@ struct vring_used {
 #define	VIRTIO_DEV_CONSOLE	0x1003
 #define	VIRTIO_DEV_RANDOM	0x1005
 #define	VIRTIO_DEV_SCSI		0x1008
+#define	VIRTIO_DEV_9P		0x1009
 
 /*
  * PCI config space constants.
@@ -287,6 +288,7 @@ vring_size(u_int qsz)
 struct vmctx;
 struct pci_devinst;
 struct vqueue_info;
+struct vm_snapshot_meta;
 
 /*
  * A virtual device, with some number (possibly 0) of virtual
@@ -361,6 +363,10 @@ struct virtio_consts {
 	void    (*vc_apply_features)(void *, uint64_t);
 				/* called to apply negotiated features */
 	uint64_t vc_hv_caps;		/* hypervisor-provided capabilities */
+	void	(*vc_pause)(void *);	/* called to pause device activity */
+	void	(*vc_resume)(void *);	/* called to resume device activity */
+	int	(*vc_snapshot)(void *, struct vm_snapshot_meta *);
+				/* called to save / restore device state */
 };
 
 /*
@@ -392,6 +398,7 @@ struct vqueue_info {
 
 	uint16_t vq_flags;	/* flags (see above) */
 	uint16_t vq_last_avail;	/* a recent value of vq_avail->va_idx */
+	uint16_t vq_next_used;	/* index of the next used slot to be filled */
 	uint16_t vq_save_used;	/* saved vq_used->vu_idx; see vq_endchains */
 	uint16_t vq_msix_idx;	/* MSI-X index, or VIRTIO_MSI_NO_VECTOR */
 
@@ -479,7 +486,10 @@ void	vi_set_io_bar(struct virtio_softc *, int);
 
 int	vq_getchain(struct vqueue_info *vq, uint16_t *pidx,
 		    struct iovec *iov, int n_iov, uint16_t *flags);
-void	vq_retchain(struct vqueue_info *vq);
+void	vq_retchains(struct vqueue_info *vq, uint16_t n_chains);
+void	vq_relchain_prepare(struct vqueue_info *vq, uint16_t idx,
+			    uint32_t iolen);
+void	vq_relchain_publish(struct vqueue_info *vq);
 void	vq_relchain(struct vqueue_info *vq, uint16_t idx, uint32_t iolen);
 void	vq_endchains(struct vqueue_info *vq, int used_all_avail);
 
@@ -487,4 +497,9 @@ uint64_t vi_pci_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 		     int baridx, uint64_t offset, int size);
 void	vi_pci_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 		     int baridx, uint64_t offset, int size, uint64_t value);
+#ifdef BHYVE_SNAPSHOT
+int	vi_pci_snapshot(struct vm_snapshot_meta *meta);
+int	vi_pci_pause(struct vmctx *ctx, struct pci_devinst *pi);
+int	vi_pci_resume(struct vmctx *ctx, struct pci_devinst *pi);
+#endif
 #endif	/* _VIRTIO_H_ */

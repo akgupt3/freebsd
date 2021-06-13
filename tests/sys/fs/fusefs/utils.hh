@@ -44,6 +44,14 @@ inline void nap()
 	usleep(NAP_NS / 1000);
 }
 
+enum cache_mode {
+	Uncached,
+	Writethrough,
+	Writeback,
+	WritebackAsync
+};
+
+const char *cache_mode_to_s(enum cache_mode cm);
 bool is_unsafe_aio_enabled(void);
 
 extern const uint32_t libfuse_max_write;
@@ -83,7 +91,9 @@ class FuseTest : public ::testing::Test {
 		m_async(false),
 		m_noclusterr(false),
 		m_nointr(false),
-		m_time_gran(1)
+		m_time_gran(1),
+		m_maxbcachebuf(0),
+		m_maxphys(0)
 	{}
 
 	virtual void SetUp();
@@ -121,6 +131,12 @@ class FuseTest : public ::testing::Test {
 	 * attributes, like the given size and the mode S_IFREG | 0644
 	 */
 	void expect_getattr(uint64_t ino, uint64_t size);
+
+	/*
+	 * Create an expectation that FUSE_GETXATTR will be called once for the
+	 * given inode.
+	 */
+	void expect_getxattr(uint64_t ino, const char *attr, ProcessMockerT r);
 
 	/*
 	 * Create an expectation that FUSE_LOOKUP will be called for the given
@@ -229,6 +245,7 @@ class FuseTest : public ::testing::Test {
 	 * to document the leakage, and provide a single point of suppression
 	 * for static analyzers.
 	 */
+	/* coverity[+close: arg-0] */
 	static void leak(int fd __unused) {}
 
 	/*

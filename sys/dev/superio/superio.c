@@ -50,9 +50,9 @@ __FBSDID("$FreeBSD$");
 #include <isa/isavar.h>
 
 #include <dev/superio/superio.h>
+#include <dev/superio/superio_io.h>
 
 #include "isa_if.h"
-
 
 typedef void (*sio_conf_enter_f)(struct resource*, uint16_t);
 typedef void (*sio_conf_exit_f)(struct resource*, uint16_t);
@@ -84,6 +84,7 @@ struct siosc {
 	struct mtx			conf_lock;
 	STAILQ_HEAD(, superio_devinfo)	devlist;
 	struct resource*		io_res;
+	struct cdev			*chardev;
 	int				io_rid;
 	uint16_t			io_port;
 	const struct sio_conf_methods	*methods;
@@ -94,6 +95,14 @@ struct siosc {
 	uint8_t				current_ldn;
 	uint8_t				ldn_reg;
 	uint8_t				enable_reg;
+};
+
+static	d_ioctl_t	superio_ioctl;
+
+static struct cdevsw superio_cdevsw = {
+	.d_version =	D_VERSION,
+	.d_ioctl =	superio_ioctl,
+	.d_name =	"superio",
 };
 
 #define NUMPORTS	2
@@ -180,6 +189,7 @@ static void
 sio_conf_exit(struct siosc *sc)
 {
 	sc->methods->exit(sc->io_res, sc->io_port);
+	sc->current_ldn = 0xff;
 	mtx_unlock(&sc->conf_lock);
 }
 
@@ -223,9 +233,29 @@ static const struct sio_conf_methods nvt_conf_methods = {
 	.vendor = SUPERIO_VENDOR_NUVOTON
 };
 
+static void
+fintek_conf_enter(struct resource* res, uint16_t port)
+{
+	bus_write_1(res, 0, 0x87);
+	bus_write_1(res, 0, 0x87);
+}
+
+static void
+fintek_conf_exit(struct resource* res, uint16_t port)
+{
+	bus_write_1(res, 0, 0xaa);
+}
+
+static const struct sio_conf_methods fintek_conf_methods = {
+	.enter = fintek_conf_enter,
+	.exit = fintek_conf_exit,
+	.vendor = SUPERIO_VENDOR_FINTEK
+};
+
 static const struct sio_conf_methods * const methods_table[] = {
 	&ite_conf_methods,
 	&nvt_conf_methods,
+	&fintek_conf_methods,
 	NULL
 };
 
@@ -248,6 +278,11 @@ const struct sio_device nct5104_devices[] = {
 	{ .ldn = 7, .type = SUPERIO_DEV_GPIO },
 	{ .ldn = 8, .type = SUPERIO_DEV_WDT },
 	{ .ldn = 15, .type = SUPERIO_DEV_GPIO },
+	{ .type = SUPERIO_DEV_NONE },
+};
+
+const struct sio_device fintek_devices[] = {
+	{ .ldn = 7, .type = SUPERIO_DEV_WDT },
 	{ .type = SUPERIO_DEV_NONE },
 };
 
@@ -400,6 +435,11 @@ static const struct {
 		.descr = "Nuvoton NCT6795",
 		.devices = nvt_devices,
 	},
+	{
+		.vendor = SUPERIO_VENDOR_FINTEK, .devid = 0x1210, .mask = 0xff,
+		.descr = "Fintek F81803",
+		.devices = fintek_devices,
+	},
 	{ 0, 0 }
 };
 
@@ -462,6 +502,10 @@ superio_detect(device_t dev, bool claim, struct siosc *sc)
 			devid = sio_readw(res, 0x20);
 			revid = sio_read(res, 0x22);
 		} else if (methods_table[m]->vendor == SUPERIO_VENDOR_NUVOTON) {
+			devid = sio_read(res, 0x20);
+			revid = sio_read(res, 0x21);
+			devid = (devid << 8) | revid;
+		} else if (methods_table[m]->vendor == SUPERIO_VENDOR_FINTEK) {
 			devid = sio_read(res, 0x20);
 			revid = sio_read(res, 0x21);
 			devid = (devid << 8) | revid;
@@ -621,6 +665,13 @@ superio_attach(device_t dev)
 
 	bus_generic_probe(dev);
 	bus_generic_attach(dev);
+
+	sc->chardev = make_dev(&superio_cdevsw, device_get_unit(dev),
+	    UID_ROOT, GID_WHEEL, 0600, "superio%d", device_get_unit(dev));
+	if (sc->chardev == NULL)
+		device_printf(dev, "failed to create character device\n");
+	else
+		sc->chardev->si_drv1 = sc;
 	return (0);
 }
 
@@ -633,6 +684,8 @@ superio_detach(device_t dev)
 	error = bus_generic_detach(dev);
 	if (error != 0)
 		return (error);
+	if (sc->chardev != NULL)
+		destroy_dev(sc->chardev);
 	device_delete_children(dev);
 	bus_release_resource(dev, SYS_RES_IOPORT, sc->io_rid, sc->io_res);
 	mtx_destroy(&sc->conf_lock);
@@ -913,6 +966,31 @@ superio_find_dev(device_t superio, superio_dev_type_t type, int ldn)
 		return (dinfo->dev);
 	}
 	return (NULL);
+}
+
+static int
+superio_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int flags,
+    struct thread *td)
+{
+	struct siosc *sc;
+	struct superiocmd *s;
+
+	sc = dev->si_drv1;
+	s = (struct superiocmd *)data;
+	switch (cmd) {
+	case SUPERIO_CR_READ:
+		sio_conf_enter(sc);
+		s->val = sio_ldn_read(sc, s->ldn, s->cr);
+		sio_conf_exit(sc);
+		return (0);
+	case SUPERIO_CR_WRITE:
+		sio_conf_enter(sc);
+		sio_ldn_write(sc, s->ldn, s->cr, s->val);
+		sio_conf_exit(sc);
+		return (0);
+	default:
+		return (ENOTTY);
+	}
 }
 
 static devclass_t superio_devclass;

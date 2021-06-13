@@ -114,9 +114,7 @@ free_pageset(struct tom_data *td, struct pageset *ps)
 
 	for (i = 0; i < ps->npages; i++) {
 		p = ps->pages[i];
-		vm_page_lock(p);
 		vm_page_unwire(p, PQ_INACTIVE);
-		vm_page_unlock(p);
 	}
 	mtx_lock(&ddp_orphan_pagesets_lock);
 	TAILQ_INSERT_TAIL(&ddp_orphan_pagesets, ps, link);
@@ -1349,7 +1347,7 @@ hold_aio(struct toepcb *toep, struct kaiocb *job, struct pageset **pps)
 
 	ps->offset = pgoff;
 	ps->len = job->uaiocb.aio_nbytes;
-	atomic_add_int(&vm->vm_refcnt, 1);
+	refcount_acquire(&vm->vm_refcnt);
 	ps->vm = vm;
 	ps->start = start;
 

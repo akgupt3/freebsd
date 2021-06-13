@@ -125,7 +125,7 @@ void expect_getattr(uint64_t ino, mode_t mode, uint64_t attr_valid, int times,
 		out.body.attr.attr.mode = mode;
 		out.body.attr.attr.size = 0;
 		out.body.attr.attr.uid = uid;
-		out.body.attr.attr.uid = gid;
+		out.body.attr.attr.gid = gid;
 		out.body.attr.attr_valid = attr_valid;
 	})));
 }
@@ -490,7 +490,7 @@ TEST_F(Create, ok)
 	expect_create(RELPATH, ino);
 
 	fd = open(FULLPATH, O_CREAT | O_EXCL, 0644);
-	EXPECT_LE(0, fd) << strerror(errno);
+	ASSERT_LE(0, fd) << strerror(errno);
 	leak(fd);
 }
 
@@ -503,7 +503,7 @@ TEST_F(Create, eacces)
 	EXPECT_LOOKUP(FUSE_ROOT_ID, RELPATH)
 		.WillOnce(Invoke(ReturnErrno(ENOENT)));
 
-	EXPECT_EQ(-1, open(FULLPATH, O_CREAT | O_EXCL, 0644));
+	ASSERT_EQ(-1, open(FULLPATH, O_CREAT | O_EXCL, 0644));
 	EXPECT_EQ(EACCES, errno);
 }
 
@@ -749,7 +749,7 @@ TEST_F(Open, eacces)
 	expect_getattr(FUSE_ROOT_ID, S_IFDIR | 0755, UINT64_MAX, 1);
 	expect_lookup(RELPATH, ino, S_IFREG | 0644, UINT64_MAX);
 
-	EXPECT_NE(0, open(FULLPATH, O_RDWR));
+	EXPECT_EQ(-1, open(FULLPATH, O_RDWR));
 	EXPECT_EQ(EACCES, errno);
 }
 
@@ -765,7 +765,7 @@ TEST_F(Open, ok)
 	expect_open(ino, 0, 1);
 
 	fd = open(FULLPATH, O_RDONLY);
-	EXPECT_LE(0, fd) << strerror(errno);
+	ASSERT_LE(0, fd) << strerror(errno);
 	leak(fd);
 }
 

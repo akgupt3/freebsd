@@ -27,7 +27,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd August 23, 2019
+.Dd September 5, 2019
 .Dt NVDIMM 4
 .Os
 .Sh NAME
@@ -75,7 +75,7 @@ the device.
 .Pp
 Also, for each SPA, the geom provider
 .Pa spaNNN
-is created, which can be used to create a conventional filesystem (e.g.
+is created, which can be used to create a conventional filesystem (e.g.,
 by
 .Xr newfs 8 )
 and
@@ -86,6 +86,18 @@ Content accessible by
 and
 .Pa /dev/spaNNN
 is coherent.
+.Pp
+The
+.Nm
+driver has support for reading NVDIMM namespaces (if supported by your
+hardware and already configured by some other mechanism, e.g., a BIOS
+configuration screen).
+The driver will provide a
+.Pa /dev/nvdimm_spaNNNnsMMM
+device node and
+.Pa spaNNNnsMMM
+geom provider for each namespace in a SPA, which behave analogously to their
+full-SPA cousins described above.
 .Sh SEE ALSO
 .Xr ACPI 4 ,
 .Xr GEOM 4 ,
@@ -109,12 +121,12 @@ and then updated by
 .Sh BUGS
 The
 .Nm
-driver does not utilize the Block Window interface, so if the write to
-NVDIMM was interrupted due to a system crash or power outage,
-the corresponding page might be left in partially updated state.
+driver does not utilize the Block Window interface, so if a write to an
+NVDIMM is interrupted due to a system crash or power outage,
+the corresponding page might be left in a partially updated state.
 .Pp
 There is no support for Device-Specific Methods (DSM), used to report and
-control the device health and wearing.
+control device health and wearing.
 .Pp
 The driver depends on the
 .Xr pmap_largemap 9

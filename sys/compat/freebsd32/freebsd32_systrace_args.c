@@ -168,9 +168,9 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 		*n_args = 0;
 		break;
 	}
-	/* ptrace */
+	/* freebsd32_ptrace */
 	case 26: {
-		struct ptrace_args *p = params;
+		struct freebsd32_ptrace_args *p = params;
 		iarg[0] = p->req; /* int */
 		iarg[1] = p->pid; /* pid_t */
 		uarg[2] = (intptr_t) p->addr; /* caddr_t */
@@ -870,10 +870,10 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 		*n_args = 4;
 		break;
 	}
-	/* ntp_adjtime */
+	/* freebsd32_ntp_adjtime */
 	case 176: {
-		struct ntp_adjtime_args *p = params;
-		uarg[0] = (intptr_t) p->tp; /* struct timex * */
+		struct freebsd32_ntp_adjtime_args *p = params;
+		uarg[0] = (intptr_t) p->tp; /* struct timex32 * */
 		*n_args = 1;
 		break;
 	}
@@ -1278,7 +1278,7 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 	case 257: {
 		struct freebsd32_lio_listio_args *p = params;
 		iarg[0] = p->mode; /* int */
-		uarg[1] = (intptr_t) p->acb_list; /* struct aiocb32 *const * */
+		uarg[1] = (intptr_t) p->acb_list; /* struct aiocb32 * const * */
 		iarg[2] = p->nent; /* int */
 		uarg[3] = (intptr_t) p->sig; /* struct sigevent32 * */
 		*n_args = 4;
@@ -1437,7 +1437,7 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 	/* freebsd32_aio_suspend */
 	case 315: {
 		struct freebsd32_aio_suspend_args *p = params;
-		uarg[0] = (intptr_t) p->aiocbp; /* struct aiocb32 *const * */
+		uarg[0] = (intptr_t) p->aiocbp; /* struct aiocb32 * const * */
 		iarg[1] = p->nent; /* int */
 		uarg[2] = (intptr_t) p->timeout; /* const struct timespec32 * */
 		*n_args = 3;
@@ -2491,15 +2491,6 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 		*n_args = 3;
 		break;
 	}
-	/* shm_open */
-	case 482: {
-		struct shm_open_args *p = params;
-		uarg[0] = (intptr_t) p->path; /* const char * */
-		iarg[1] = p->flags; /* int */
-		iarg[2] = p->mode; /* mode_t */
-		*n_args = 3;
-		break;
-	}
 	/* shm_unlink */
 	case 483: {
 		struct shm_unlink_args *p = params;
@@ -2728,13 +2719,6 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 	case 508: {
 		struct jail_remove_args *p = params;
 		iarg[0] = p->jid; /* int */
-		*n_args = 1;
-		break;
-	}
-	/* closefrom */
-	case 509: {
-		struct closefrom_args *p = params;
-		iarg[0] = p->lowfd; /* int */
 		*n_args = 1;
 		break;
 	}
@@ -3344,6 +3328,62 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 		*n_args = 6;
 		break;
 	}
+	/* shm_open2 */
+	case 571: {
+		struct shm_open2_args *p = params;
+		uarg[0] = (intptr_t) p->path; /* const char * */
+		iarg[1] = p->flags; /* int */
+		iarg[2] = p->mode; /* mode_t */
+		iarg[3] = p->shmflags; /* int */
+		uarg[4] = (intptr_t) p->name; /* const char * */
+		*n_args = 5;
+		break;
+	}
+	/* shm_rename */
+	case 572: {
+		struct shm_rename_args *p = params;
+		uarg[0] = (intptr_t) p->path_from; /* const char * */
+		uarg[1] = (intptr_t) p->path_to; /* const char * */
+		iarg[2] = p->flags; /* int */
+		*n_args = 3;
+		break;
+	}
+	/* sigfastblock */
+	case 573: {
+		struct sigfastblock_args *p = params;
+		iarg[0] = p->cmd; /* int */
+		uarg[1] = (intptr_t) p->ptr; /* uint32_t * */
+		*n_args = 2;
+		break;
+	}
+	/* __realpathat */
+	case 574: {
+		struct __realpathat_args *p = params;
+		iarg[0] = p->fd; /* int */
+		uarg[1] = (intptr_t) p->path; /* const char * */
+		uarg[2] = (intptr_t) p->buf; /* char * */
+		uarg[3] = p->size; /* size_t */
+		iarg[4] = p->flags; /* int */
+		*n_args = 5;
+		break;
+	}
+	/* close_range */
+	case 575: {
+		struct close_range_args *p = params;
+		uarg[0] = p->lowfd; /* u_int */
+		uarg[1] = p->highfd; /* u_int */
+		iarg[2] = p->flags; /* int */
+		*n_args = 3;
+		break;
+	}
+	/* rpctls_syscall */
+	case 576: {
+		struct rpctls_syscall_args *p = params;
+		iarg[0] = p->op; /* int */
+		uarg[1] = (intptr_t) p->path; /* const char * */
+		*n_args = 2;
+		break;
+	}
 	default:
 		*n_args = 0;
 		break;
@@ -3583,7 +3623,7 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 	/* geteuid */
 	case 25:
 		break;
-	/* ptrace */
+	/* freebsd32_ptrace */
 	case 26:
 		switch(ndx) {
 		case 0:
@@ -4746,11 +4786,11 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			break;
 		};
 		break;
-	/* ntp_adjtime */
+	/* freebsd32_ntp_adjtime */
 	case 176:
 		switch(ndx) {
 		case 0:
-			p = "userland struct timex *";
+			p = "userland struct timex32 *";
 			break;
 		default:
 			break;
@@ -5359,7 +5399,7 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			p = "int";
 			break;
 		case 1:
-			p = "userland struct aiocb32 *const *";
+			p = "userland struct aiocb32 * const *";
 			break;
 		case 2:
 			p = "int";
@@ -5616,7 +5656,7 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 	case 315:
 		switch(ndx) {
 		case 0:
-			p = "userland struct aiocb32 *const *";
+			p = "userland struct aiocb32 * const *";
 			break;
 		case 1:
 			p = "int";
@@ -7442,22 +7482,6 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			break;
 		};
 		break;
-	/* shm_open */
-	case 482:
-		switch(ndx) {
-		case 0:
-			p = "userland const char *";
-			break;
-		case 1:
-			p = "int";
-			break;
-		case 2:
-			p = "mode_t";
-			break;
-		default:
-			break;
-		};
-		break;
 	/* shm_unlink */
 	case 483:
 		switch(ndx) {
@@ -7873,16 +7897,6 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 		break;
 	/* jail_remove */
 	case 508:
-		switch(ndx) {
-		case 0:
-			p = "int";
-			break;
-		default:
-			break;
-		};
-		break;
-	/* closefrom */
-	case 509:
 		switch(ndx) {
 		case 0:
 			p = "int";
@@ -9008,6 +9022,108 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			break;
 		};
 		break;
+	/* shm_open2 */
+	case 571:
+		switch(ndx) {
+		case 0:
+			p = "userland const char *";
+			break;
+		case 1:
+			p = "int";
+			break;
+		case 2:
+			p = "mode_t";
+			break;
+		case 3:
+			p = "int";
+			break;
+		case 4:
+			p = "userland const char *";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* shm_rename */
+	case 572:
+		switch(ndx) {
+		case 0:
+			p = "userland const char *";
+			break;
+		case 1:
+			p = "userland const char *";
+			break;
+		case 2:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* sigfastblock */
+	case 573:
+		switch(ndx) {
+		case 0:
+			p = "int";
+			break;
+		case 1:
+			p = "userland uint32_t *";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* __realpathat */
+	case 574:
+		switch(ndx) {
+		case 0:
+			p = "int";
+			break;
+		case 1:
+			p = "userland const char *";
+			break;
+		case 2:
+			p = "userland char *";
+			break;
+		case 3:
+			p = "size_t";
+			break;
+		case 4:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* close_range */
+	case 575:
+		switch(ndx) {
+		case 0:
+			p = "u_int";
+			break;
+		case 1:
+			p = "u_int";
+			break;
+		case 2:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* rpctls_syscall */
+	case 576:
+		switch(ndx) {
+		case 0:
+			p = "int";
+			break;
+		case 1:
+			p = "userland const char *";
+			break;
+		default:
+			break;
+		};
+		break;
 	default:
 		break;
 	};
@@ -9112,7 +9228,7 @@ systrace_return_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 	case 24:
 	/* geteuid */
 	case 25:
-	/* ptrace */
+	/* freebsd32_ptrace */
 	case 26:
 		if (ndx == 0 || ndx == 1)
 			p = "int";
@@ -9513,7 +9629,7 @@ systrace_return_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 		if (ndx == 0 || ndx == 1)
 			p = "int";
 		break;
-	/* ntp_adjtime */
+	/* freebsd32_ntp_adjtime */
 	case 176:
 		if (ndx == 0 || ndx == 1)
 			p = "int";
@@ -10443,11 +10559,6 @@ systrace_return_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 		if (ndx == 0 || ndx == 1)
 			p = "int";
 		break;
-	/* shm_open */
-	case 482:
-		if (ndx == 0 || ndx == 1)
-			p = "int";
-		break;
 	/* shm_unlink */
 	case 483:
 		if (ndx == 0 || ndx == 1)
@@ -10568,11 +10679,6 @@ systrace_return_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 		break;
 	/* jail_remove */
 	case 508:
-		if (ndx == 0 || ndx == 1)
-			p = "int";
-		break;
-	/* closefrom */
-	case 509:
 		if (ndx == 0 || ndx == 1)
 			p = "int";
 		break;
@@ -10889,6 +10995,36 @@ systrace_return_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 		break;
 	/* freebsd32___sysctlbyname */
 	case 570:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* shm_open2 */
+	case 571:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* shm_rename */
+	case 572:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* sigfastblock */
+	case 573:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* __realpathat */
+	case 574:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* close_range */
+	case 575:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* rpctls_syscall */
+	case 576:
 		if (ndx == 0 || ndx == 1)
 			p = "int";
 		break;

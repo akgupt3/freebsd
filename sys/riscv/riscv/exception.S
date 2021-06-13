@@ -40,12 +40,12 @@ __FBSDID("$FreeBSD$");
 #include <machine/trap.h>
 #include <machine/riscvreg.h>
 
-.macro save_registers el
+.macro save_registers mode
 	addi	sp, sp, -(TF_SIZE)
 
 	sd	ra, (TF_RA)(sp)
 
-.if \el == 0	/* We came from userspace. */
+.if \mode == 0	/* We came from userspace. */
 	sd	gp, (TF_GP)(sp)
 .option push
 .option norelax
@@ -88,7 +88,7 @@ __FBSDID("$FreeBSD$");
 	sd	a6, (TF_A + 6 * 8)(sp)
 	sd	a7, (TF_A + 7 * 8)(sp)
 
-.if \el == 1
+.if \mode == 1
 	/* Store kernel sp */
 	li	t1, TF_SIZE
 	add	t0, sp, t1
@@ -110,9 +110,9 @@ __FBSDID("$FreeBSD$");
 	sd	t0, (TF_SCAUSE)(sp)
 .endm
 
-.macro load_registers el
+.macro load_registers mode
 	ld	t0, (TF_SSTATUS)(sp)
-.if \el == 0
+.if \mode == 0
 	/* Ensure user interrupts will be enabled on eret */
 	li	t1, SSTATUS_SPIE
 	or	t0, t0, t1
@@ -130,7 +130,7 @@ __FBSDID("$FreeBSD$");
 	ld	t0, (TF_SEPC)(sp)
 	csrw	sepc, t0
 
-.if \el == 0
+.if \mode == 0
 	/* We go to userspace. Load user sp */
 	ld	t0, (TF_SP)(sp)
 	csrw	sscratch, t0
@@ -208,7 +208,6 @@ ENTRY(cpu_exception_handler)
 	csrrw	sp, sscratch, sp
 	beqz	sp, 1f
 	/* User mode detected */
-	csrrw	sp, sscratch, sp
 	j	cpu_exception_handler_user
 1:
 	/* Supervisor mode detected */
@@ -225,7 +224,6 @@ ENTRY(cpu_exception_handler_supervisor)
 END(cpu_exception_handler_supervisor)
 
 ENTRY(cpu_exception_handler_user)
-	csrrw	sp, sscratch, sp
 	save_registers 0
 	mv	a0, sp
 	call	_C_LABEL(do_trap_user)

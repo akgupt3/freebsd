@@ -44,6 +44,9 @@ __FBSDID("$FreeBSD$");
 #include <gdb/gdb.h>
 #include <gdb/gdb_int.h>
 
+SYSCTL_NODE(_debug, OID_AUTO, gdb, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "GDB settings");
+
 static dbbe_init_f gdb_init;
 static dbbe_trap_f gdb_trap;
 
@@ -55,8 +58,13 @@ SET_DECLARE(gdb_dbgport_set, struct gdb_dbgport);
 
 struct gdb_dbgport *gdb_cur = NULL;
 int gdb_listening = 0;
+bool gdb_ackmode = true;
 
 static unsigned char gdb_bindata[64];
+
+#ifdef DDB
+bool gdb_return_to_ddb = false;
+#endif
 
 static int
 gdb_init(void)
@@ -196,8 +204,14 @@ gdb_do_qsupported(uint32_t *feat)
 
 	/* Parse supported host features */
 	*feat = 0;
-	if (gdb_rx_char() != ':')
+	switch (gdb_rx_char()) {
+	case ':':
+		break;
+	case EOF:
+		goto nofeatures;
+	default:
 		goto error;
+	}
 
 	while (gdb_rxsz > 0) {
 		tok = gdb_rxp;
@@ -242,6 +256,7 @@ gdb_do_qsupported(uint32_t *feat)
 		*feat |= BIT(i);
 	}
 
+nofeatures:
 	/* Send a supported feature list back */
 	gdb_tx_begin(0);
 
@@ -254,6 +269,14 @@ gdb_do_qsupported(uint32_t *feat)
 	gdb_tx_varhex(GDB_BUFSZ + strlen("$#nn") - 1);
 
 	gdb_tx_str(";qXfer:threads:read+");
+
+	/*
+	 * If the debugport is a reliable transport, request No Ack mode from
+	 * the server.  The server may or may not choose to enter No Ack mode.
+	 * https://sourceware.org/gdb/onlinedocs/gdb/Packet-Acknowledgment.html
+	 */
+	if (gdb_cur->gdb_dbfeatures & GDB_DBGP_FEAT_RELIABLE)
+		gdb_tx_str(";QStartNoAckMode+");
 
 	/*
 	 * Future consideration:
@@ -338,9 +361,7 @@ init_qXfer_ctx(struct qXfer_context *qx, uintmax_t len)
 }
 
 /*
- * dst must be 2x strlen(max_src) + 1.
- *
- * Squashes invalid XML characters down to _.  Sorry.  Then escapes for GDB.
+ * Squashes special XML and GDB characters down to _.  Sorry.
  */
 static void
 qXfer_escape_xmlattr_str(char *dst, size_t dstlen, const char *src)
@@ -361,8 +382,18 @@ qXfer_escape_xmlattr_str(char *dst, size_t dstlen, const char *src)
 
 		/* GDB escape. */
 		if (strchr(forbidden, c) != NULL) {
+			/*
+			 * It would be nice to escape these properly, but to do
+			 * it correctly we need to escape them in the transmit
+			 * layer, potentially doubling our buffer requirements.
+			 * For now, avoid breaking the protocol by squashing
+			 * them to underscore.
+			 */
+#if 0
 			*dst++ = '}';
 			c ^= 0x20;
+#endif
+			c = '_';
 		}
 		*dst++ = c;
 	}
@@ -567,6 +598,26 @@ unrecognized:
 	return;
 }
 
+static void
+gdb_handle_detach(void)
+{
+	kdb_cpu_clear_singlestep();
+	gdb_listening = 0;
+
+	if (gdb_cur->gdb_dbfeatures & GDB_DBGP_FEAT_WANTTERM)
+		gdb_cur->gdb_term();
+
+#ifdef DDB
+	if (!gdb_return_to_ddb)
+		return;
+
+	gdb_return_to_ddb = false;
+
+	if (kdb_dbbe_select("ddb") != 0)
+		printf("The ddb backend could not be selected.\n");
+#endif
+}
+
 static int
 gdb_trap(int type, int code)
 {
@@ -584,6 +635,8 @@ gdb_trap(int type, int code)
 	}
 
 	gdb_listening = 0;
+	gdb_ackmode = true;
+
 	/*
 	 * Send a T packet. We currently do not support watchpoints (the
 	 * awatch, rwatch or watch elements).
@@ -636,7 +689,7 @@ gdb_trap(int type, int code)
 		}
 		case 'D': {     /* Detach */
 			gdb_tx_ok();
-			kdb_cpu_clear_singlestep();
+			gdb_handle_detach();
 			return (1);
 		}
 		case 'g': {	/* Read registers. */
@@ -673,8 +726,7 @@ gdb_trap(int type, int code)
 			break;
 		}
 		case 'k':	/* Kill request. */
-			kdb_cpu_clear_singlestep();
-			gdb_listening = 1;
+			gdb_handle_detach();
 			return (1);
 		case 'm': {	/* Read memory. */
 			uintmax_t addr, size;
@@ -733,7 +785,27 @@ gdb_trap(int type, int code)
 				do_qXfer();
 			} else if (gdb_rx_equal("Search:memory:")) {
 				gdb_do_mem_search();
+#ifdef __powerpc__
+			} else if (gdb_rx_equal("Offsets")) {
+				gdb_cpu_do_offsets();
+#endif
 			} else if (!gdb_cpu_query())
+				gdb_tx_empty();
+			break;
+		case 'Q':
+			if (gdb_rx_equal("StartNoAckMode")) {
+				if ((gdb_cur->gdb_dbfeatures &
+				    GDB_DBGP_FEAT_RELIABLE) == 0) {
+					/*
+					 * Shouldn't happen if we didn't
+					 * advertise support.  Reject.
+					 */
+					gdb_tx_empty();
+					break;
+				}
+				gdb_ackmode = false;
+				gdb_tx_ok();
+			} else
 				gdb_tx_empty();
 			break;
 		case 's': {	/* Step. */

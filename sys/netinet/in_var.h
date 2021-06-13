@@ -171,6 +171,7 @@ do { \
 	/* struct in_ifaddr *ia; */					\
 	/* struct rm_priotracker *t; */					\
 do {									\
+	NET_EPOCH_ASSERT();						\
 	IN_IFADDR_RLOCK((t));						\
 	for ((ia) = CK_STAILQ_FIRST(&V_in_ifaddrhead);			\
 	    (ia) != NULL && (ia)->ia_ifp != (ifp);			\
@@ -435,8 +436,7 @@ inm_rele_locked(struct in_multi_head *inmh, struct in_multi *inm)
 #define MCAST_NOTSMEMBER	2	/* This host excluded source */
 #define MCAST_MUTED		3	/* [deprecated] */
 
-struct	rtentry;
-struct	route;
+struct rib_head;
 struct	ip_moptions;
 
 struct in_multi *inm_lookup_locked(struct ifnet *, const struct in_addr);
@@ -449,6 +449,7 @@ void	inm_print(const struct in_multi *);
 int	inm_record_source(struct in_multi *inm, const in_addr_t);
 void	inm_release_deferred(struct in_multi *);
 void	inm_release_list_deferred(struct in_multi_head *);
+void	inm_release_wait(void *);
 struct	in_multi *
 in_addmulti(struct in_addr *, struct ifnet *);
 int	in_joingroup(struct ifnet *, const struct in_addr *,
@@ -469,12 +470,11 @@ void	in_ifadown(struct ifaddr *ifa, int);
 struct	mbuf	*ip_tryforward(struct mbuf *);
 void	*in_domifattach(struct ifnet *);
 void	in_domifdetach(struct ifnet *, void *);
+struct rib_head *in_inithead(uint32_t fibnum);
+#ifdef VIMAGE
+void	in_detachhead(struct rib_head *rh);
+#endif
 
-
-/* XXX */
-void	 in_rtalloc_ign(struct route *ro, u_long ignflags, u_int fibnum);
-void	 in_rtredirect(struct sockaddr *, struct sockaddr *,
-	    struct sockaddr *, int, struct sockaddr *, u_int);
 #endif /* _KERNEL */
 
 /* INET6 stuff */

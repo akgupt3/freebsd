@@ -55,6 +55,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/proc.h>
 #include <sys/rwlock.h>
 #include <sys/rmlock.h>
+#include <sys/sdt.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/sysctl.h>
@@ -64,6 +65,7 @@ __FBSDID("$FreeBSD$");
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/route.h>
+#include <net/route/nhop.h>
 #include <net/pfil.h>
 #include <net/vnet.h>
 
@@ -104,6 +106,18 @@ __FBSDID("$FreeBSD$");
 #ifdef MAC
 #include <security/mac/mac_framework.h>
 #endif
+
+#define	IPFW_PROBE(probe, arg0, arg1, arg2, arg3, arg4, arg5)		\
+    SDT_PROBE6(ipfw, , , probe, arg0, arg1, arg2, arg3, arg4, arg5)
+
+SDT_PROVIDER_DEFINE(ipfw);
+SDT_PROBE_DEFINE6(ipfw, , , rule__matched,
+    "int",			/* retval */
+    "int",			/* af */
+    "void *",			/* src addr */
+    "void *",			/* dst addr */
+    "struct ip_fw_args *",	/* args */
+    "struct ip_fw *"		/* rule */);
 
 /*
  * static variables followed by global ones.
@@ -179,7 +193,8 @@ static int sysctl_ipfw_tables_sets(SYSCTL_HANDLER_ARGS);
 
 SYSBEGIN(f3)
 
-SYSCTL_NODE(_net_inet_ip, OID_AUTO, fw, CTLFLAG_RW, 0, "Firewall");
+SYSCTL_NODE(_net_inet_ip, OID_AUTO, fw, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "Firewall");
 SYSCTL_INT(_net_inet_ip_fw, OID_AUTO, one_pass,
     CTLFLAG_VNET | CTLFLAG_RW | CTLFLAG_SECURE3, &VNET_NAME(fw_one_pass), 0,
     "Only do a single pass through ipfw when using dummynet(4)");
@@ -196,10 +211,11 @@ SYSCTL_UINT(_net_inet_ip_fw, OID_AUTO, default_rule, CTLFLAG_RD,
     &dummy_def, 0,
     "The default/max possible rule number.");
 SYSCTL_PROC(_net_inet_ip_fw, OID_AUTO, tables_max,
-    CTLFLAG_VNET | CTLTYPE_UINT | CTLFLAG_RW, 0, 0, sysctl_ipfw_table_num, "IU",
+    CTLFLAG_VNET | CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_MPSAFE,
+    0, 0, sysctl_ipfw_table_num, "IU",
     "Maximum number of concurrently used tables");
 SYSCTL_PROC(_net_inet_ip_fw, OID_AUTO, tables_sets,
-    CTLFLAG_VNET | CTLTYPE_UINT | CTLFLAG_RW,
+    CTLFLAG_VNET | CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_MPSAFE,
     0, 0, sysctl_ipfw_tables_sets, "IU",
     "Use per-set namespace for tables");
 SYSCTL_INT(_net_inet_ip_fw, OID_AUTO, default_to_accept, CTLFLAG_RDTUN,
@@ -212,7 +228,8 @@ SYSCTL_INT(_net_inet_ip_fw, OID_AUTO, static_count,
 
 #ifdef INET6
 SYSCTL_DECL(_net_inet6_ip6);
-SYSCTL_NODE(_net_inet6_ip6, OID_AUTO, fw, CTLFLAG_RW, 0, "Firewall");
+SYSCTL_NODE(_net_inet6_ip6, OID_AUTO, fw, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "Firewall");
 SYSCTL_INT(_net_inet6_ip6_fw, OID_AUTO, deny_unknown_exthdrs,
     CTLFLAG_VNET | CTLFLAG_RW | CTLFLAG_SECURE,
     &VNET_NAME(fw_deny_unknown_exthdrs), 0,
@@ -226,7 +243,6 @@ SYSCTL_INT(_net_inet6_ip6_fw, OID_AUTO, permit_single_frag6,
 SYSEND
 
 #endif /* SYSCTL_NODE */
-
 
 /*
  * Some macros used in the various matching options.
@@ -306,7 +322,6 @@ ipopts_match(struct ip *ip, ipfw_insn *cmd)
 				return 0; /* invalid or truncated */
 		}
 		switch (opt) {
-
 		default:
 			break;
 
@@ -330,22 +345,27 @@ ipopts_match(struct ip *ip, ipfw_insn *cmd)
 	return (flags_match(cmd, bits));
 }
 
+/*
+ * Parse TCP options. The logic copied from tcp_dooptions().
+ */
 static int
-tcpopts_parse(struct tcphdr *tcp, uint16_t *mss)
+tcpopts_parse(const struct tcphdr *tcp, uint16_t *mss)
 {
-	u_char *cp = (u_char *)(tcp + 1);
+	const u_char *cp = (const u_char *)(tcp + 1);
 	int optlen, bits = 0;
-	int x = (tcp->th_off << 2) - sizeof(struct tcphdr);
+	int cnt = (tcp->th_off << 2) - sizeof(struct tcphdr);
 
-	for (; x > 0; x -= optlen, cp += optlen) {
+	for (; cnt > 0; cnt -= optlen, cp += optlen) {
 		int opt = cp[0];
 		if (opt == TCPOPT_EOL)
 			break;
 		if (opt == TCPOPT_NOP)
 			optlen = 1;
 		else {
+			if (cnt < 2)
+				break;
 			optlen = cp[1];
-			if (optlen <= 0)
+			if (optlen < 2 || optlen > cnt)
 				break;
 		}
 
@@ -354,22 +374,31 @@ tcpopts_parse(struct tcphdr *tcp, uint16_t *mss)
 			break;
 
 		case TCPOPT_MAXSEG:
+			if (optlen != TCPOLEN_MAXSEG)
+				break;
 			bits |= IP_FW_TCPOPT_MSS;
 			if (mss != NULL)
 				*mss = be16dec(cp + 2);
 			break;
 
 		case TCPOPT_WINDOW:
-			bits |= IP_FW_TCPOPT_WINDOW;
+			if (optlen == TCPOLEN_WINDOW)
+				bits |= IP_FW_TCPOPT_WINDOW;
 			break;
 
 		case TCPOPT_SACK_PERMITTED:
+			if (optlen == TCPOLEN_SACK_PERMITTED)
+				bits |= IP_FW_TCPOPT_SACK;
+			break;
+
 		case TCPOPT_SACK:
-			bits |= IP_FW_TCPOPT_SACK;
+			if (optlen > 2 && (optlen - 2) % TCPOLEN_SACK == 0)
+				bits |= IP_FW_TCPOPT_SACK;
 			break;
 
 		case TCPOPT_TIMESTAMP:
-			bits |= IP_FW_TCPOPT_TS;
+			if (optlen == TCPOLEN_TIMESTAMP)
+				bits |= IP_FW_TCPOPT_TS;
 			break;
 		}
 	}
@@ -408,17 +437,15 @@ iface_match(struct ifnet *ifp, ipfw_insn_if *cmd, struct ip_fw_chain *chain,
 #if !defined(USERSPACE) && defined(__FreeBSD__)	/* and OSX too ? */
 		struct ifaddr *ia;
 
-		if_addr_rlock(ifp);
+		NET_EPOCH_ASSERT();
+
 		CK_STAILQ_FOREACH(ia, &ifp->if_addrhead, ifa_link) {
 			if (ia->ifa_addr->sa_family != AF_INET)
 				continue;
 			if (cmd->p.ip.s_addr == ((struct sockaddr_in *)
-			    (ia->ifa_addr))->sin_addr.s_addr) {
-				if_addr_runlock(ifp);
-				return(1);	/* match */
-			}
+			    (ia->ifa_addr))->sin_addr.s_addr)
+				return (1);	/* match */
 		}
-		if_addr_runlock(ifp);
 #endif /* __FreeBSD__ */
 	}
 	return(0);	/* no match, fail ... */
@@ -451,9 +478,10 @@ verify_path(struct in_addr src, struct ifnet *ifp, u_int fib)
 #if defined(USERSPACE) || !defined(__FreeBSD__)
 	return 0;
 #else
-	struct nhop4_basic nh4;
+	struct nhop_object *nh;
 
-	if (fib4_lookup_nh_basic(fib, src, NHR_IFAIF, 0, &nh4) != 0)
+	nh = fib4_lookup(fib, src, 0, NHR_NONE, 0);
+	if (nh == NULL)
 		return (0);
 
 	/*
@@ -463,15 +491,15 @@ verify_path(struct in_addr src, struct ifnet *ifp, u_int fib)
 	 * routing entry (via lo0) for our own address
 	 * may exist, so we need to handle routing assymetry.
 	 */
-	if (ifp != NULL && ifp != nh4.nh_ifp)
+	if (ifp != NULL && ifp != nh->nh_aifp)
 		return (0);
 
 	/* if no ifp provided, check if rtentry is not default route */
-	if (ifp == NULL && (nh4.nh_flags & NHF_DEFAULT) != 0)
+	if (ifp == NULL && (nh->nh_flags & NHF_DEFAULT) != 0)
 		return (0);
 
 	/* or if this is a blackhole/reject route */
-	if (ifp == NULL && (nh4.nh_flags & (NHF_REJECT|NHF_BLACKHOLE)) != 0)
+	if (ifp == NULL && (nh->nh_flags & (NHF_REJECT|NHF_BLACKHOLE)) != 0)
 		return (0);
 
 	/* found valid route */
@@ -740,17 +768,17 @@ ipfw_send_pkt(struct mbuf *replyto, struct ipfw_flow_id *id, u_int32_t seq,
  * ipv6 specific rules here...
  */
 static __inline int
-icmp6type_match (int type, ipfw_insn_u32 *cmd)
+icmp6type_match(int type, ipfw_insn_u32 *cmd)
 {
 	return (type <= ICMP6_MAXTYPE && (cmd->d[type/32] & (1<<(type%32)) ) );
 }
 
 static int
-flow6id_match( int curr_flow, ipfw_insn_u32 *cmd )
+flow6id_match(int curr_flow, ipfw_insn_u32 *cmd)
 {
 	int i;
-	for (i=0; i <= cmd->o.arg1; ++i )
-		if (curr_flow == cmd->d[i] )
+	for (i=0; i <= cmd->o.arg1; ++i)
+		if (curr_flow == cmd->d[i])
 			return 1;
 	return 0;
 }
@@ -790,24 +818,25 @@ ipfw_localip6(struct in6_addr *in6)
 static int
 verify_path6(struct in6_addr *src, struct ifnet *ifp, u_int fib)
 {
-	struct nhop6_basic nh6;
+	struct nhop_object *nh;
 
 	if (IN6_IS_SCOPE_LINKLOCAL(src))
 		return (1);
 
-	if (fib6_lookup_nh_basic(fib, src, 0, NHR_IFAIF, 0, &nh6) != 0)
+	nh = fib6_lookup(fib, src, 0, NHR_NONE, 0);
+	if (nh == NULL)
 		return (0);
 
 	/* If ifp is provided, check for equality with route table. */
-	if (ifp != NULL && ifp != nh6.nh_ifp)
+	if (ifp != NULL && ifp != nh->nh_aifp)
 		return (0);
 
 	/* if no ifp provided, check if rtentry is not default route */
-	if (ifp == NULL && (nh6.nh_flags & NHF_DEFAULT) != 0)
+	if (ifp == NULL && (nh->nh_flags & NHF_DEFAULT) != 0)
 		return (0);
 
 	/* or if this is a blackhole/reject route */
-	if (ifp == NULL && (nh6.nh_flags & (NHF_REJECT|NHF_BLACKHOLE)) != 0)
+	if (ifp == NULL && (nh->nh_flags & (NHF_REJECT|NHF_BLACKHOLE)) != 0)
 		return (0);
 
 	/* found valid route */
@@ -922,7 +951,7 @@ send_reject6(struct ip_fw_args *args, int code, u_int hlen, struct ip6_hdr *ip6)
 				 * If the packet contains an ABORT chunk, don't
 				 * reply.
 				 * XXX: We should search through all chunks,
-				 *      but don't do to avoid attacks.
+				 * but do not do that to avoid attacks.
 				 */
 				v_tag = 0;
 				break;
@@ -959,7 +988,6 @@ send_reject6(struct ip_fw_args *args, int code, u_int hlen, struct ip6_hdr *ip6)
 }
 
 #endif /* INET6 */
-
 
 /*
  * sends a reject message, consuming the mbuf passed as an argument.
@@ -1040,7 +1068,7 @@ send_reject(struct ip_fw_args *args, int code, int iplen, struct ip *ip)
 				 * If the packet contains an ABORT chunk, don't
 				 * reply.
 				 * XXX: We should search through all chunks,
-				 * but don't do to avoid attacks.
+				 * but do not do that to avoid attacks.
 				 */
 				v_tag = 0;
 				break;
@@ -1448,7 +1476,10 @@ ipfw_chk(struct ip_fw_args *args)
 do {								\
 	int x = (_len) + T + EHLEN;				\
 	if (mem) {						\
-		MPASS(pktlen >= x);				\
+		if (__predict_false(pktlen < x)) {		\
+			unlock;					\
+			goto pullup_failed;			\
+		}						\
 		p = (char *)args->mem + (_len) + EHLEN;		\
 	} else {						\
 		if (__predict_false((m)->m_len < x)) {		\
@@ -1464,7 +1495,8 @@ do {								\
 
 #define	PULLUP_LEN(_len, p, T)	_PULLUP_LOCKED(_len, p, T, )
 #define	PULLUP_LEN_LOCKED(_len, p, T)	\
-    _PULLUP_LOCKED(_len, p, T, IPFW_PF_RUNLOCK(chain))
+    _PULLUP_LOCKED(_len, p, T, IPFW_PF_RUNLOCK(chain));	\
+    UPDATE_POINTERS()
 /*
  * In case pointers got stale after pullups, update them.
  */
@@ -1922,7 +1954,23 @@ do {								\
 				break;
 
 			case O_FRAG:
-				match = (offset != 0);
+				if (is_ipv4) {
+					/*
+					 * Since flags_match() works with
+					 * uint8_t we pack ip_off into 8 bits.
+					 * For this match offset is a boolean.
+					 */
+					match = flags_match(cmd,
+					    ((ntohs(ip->ip_off) & ~IP_OFFMASK)
+					    >> 8) | (offset != 0));
+				} else {
+					/*
+					 * Compatiblity: historically bare
+					 * "frag" would match IPv6 fragments.
+					 */
+					match = (cmd->arg1 == 0x1 &&
+					    (offset != 0));
+				}
 				break;
 
 			case O_IN:	/* "out" is "not in" */
@@ -2087,6 +2135,8 @@ do {								\
 					uint32_t v = 0;
 					match = ipfw_lookup_table(chain,
 					    cmd->arg1, 0, &args->f_id, &v);
+					if (!match)
+						break;
 					if (cmdlen == F_INSN_SIZE(ipfw_insn_u32))
 						match = ((ipfw_insn_u32 *)cmd)->d[0] ==
 						    TARG_VAL(chain, v, tag);
@@ -2158,7 +2208,6 @@ do {								\
 #endif
 				break;
 
-
 			case O_IP_SRCPORT:
 			case O_IP_DSTPORT:
 				/*
@@ -2204,7 +2253,7 @@ do {								\
 				break;
 
 			case O_IPVER:
-				match = (is_ipv4 &&
+				match = ((is_ipv4 || is_ipv6) &&
 				    cmd->arg1 == ip->ip_v);
 				break;
 
@@ -3201,6 +3250,13 @@ do {								\
 		struct ip_fw *rule = chain->map[f_pos];
 		/* Update statistics */
 		IPFW_INC_RULE_COUNTER(rule, pktlen);
+		IPFW_PROBE(rule__matched, retval,
+		    is_ipv4 ? AF_INET : AF_INET6,
+		    is_ipv4 ? (uintptr_t)&src_ip :
+		        (uintptr_t)&args->f_id.src_ip6,
+		    is_ipv4 ? (uintptr_t)&dst_ip :
+		        (uintptr_t)&args->f_id.dst_ip6,
+		    args, rule);
 	} else {
 		retval = IP_FW_DENY;
 		printf("ipfw: ouch!, skip past end of rules, denying packet\n");
@@ -3522,7 +3578,7 @@ SYSINIT(ipfw_init, IPFW_SI_SUB_FIREWALL, IPFW_MODULE_ORDER,
 	    ipfw_init, NULL);
 VNET_SYSINIT(vnet_ipfw_init, IPFW_SI_SUB_FIREWALL, IPFW_VNET_ORDER,
 	    vnet_ipfw_init, NULL);
- 
+
 /*
  * Closing up shop. These are done in REVERSE ORDER, but still
  * after ipfwmod() has been called. Not called on reboot.

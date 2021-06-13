@@ -42,6 +42,7 @@ static char sccsid[] = "@(#)mount.c	8.25 (Berkeley) 5/8/95";
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#define _WANT_MNTOPTNAMES
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -92,34 +93,8 @@ void	usage(void);
 char   *flags2opts(int);
 
 /* Map from mount options to printable formats. */
-static struct opt {
-	uint64_t o_opt;
-	const char *o_name;
-} optnames[] = {
-	{ MNT_ASYNC,		"asynchronous" },
-	{ MNT_EXPORTED,		"NFS exported" },
-	{ MNT_LOCAL,		"local" },
-	{ MNT_NOATIME,		"noatime" },
-	{ MNT_NOEXEC,		"noexec" },
-	{ MNT_NOSUID,		"nosuid" },
-	{ MNT_NOSYMFOLLOW,	"nosymfollow" },
-	{ MNT_QUOTA,		"with quotas" },
-	{ MNT_RDONLY,		"read-only" },
-	{ MNT_SYNCHRONOUS,	"synchronous" },
-	{ MNT_UNION,		"union" },
-	{ MNT_NOCLUSTERR,	"noclusterr" },
-	{ MNT_NOCLUSTERW,	"noclusterw" },
-	{ MNT_SUIDDIR,		"suiddir" },
-	{ MNT_SOFTDEP,		"soft-updates" },
-	{ MNT_SUJ,		"journaled soft-updates" },
-	{ MNT_MULTILABEL,	"multilabel" },
-	{ MNT_ACLS,		"acls" },
-	{ MNT_NFS4ACLS,		"nfsv4acls" },
-	{ MNT_GJOURNAL,		"gjournal" },
-	{ MNT_AUTOMOUNTED,	"automounted" },
-	{ MNT_VERIFIED,		"verified" },
-	{ MNT_UNTRUSTED,	"untrusted" },
-	{ 0, NULL }
+static struct mntoptnames optnames[] = {
+	MNTOPT_NAMES
 };
 
 /*
@@ -662,7 +637,7 @@ prmount(struct statfs *sfp)
 {
 	uint64_t flags;
 	unsigned int i;
-	struct opt *o;
+	struct mntoptnames *o;
 	struct passwd *pw;
 
 	(void)printf("%s on %s (%s", sfp->f_mntfromname, sfp->f_mntonname,
@@ -695,9 +670,9 @@ prmount(struct statfs *sfp)
 			    (uintmax_t)sfp->f_syncreads,
 			    (uintmax_t)sfp->f_asyncreads);
 		if (sfp->f_fsid.val[0] != 0 || sfp->f_fsid.val[1] != 0) {
-			printf(", fsid ");
+			(void)printf(", fsid ");
 			for (i = 0; i < sizeof(sfp->f_fsid); i++)
-				printf("%02x", ((u_char *)&sfp->f_fsid)[i]);
+				(void)printf("%02x", ((u_char *)&sfp->f_fsid)[i]);
 		}
 	}
 	(void)printf(")\n");
@@ -975,6 +950,8 @@ flags2opts(int flags)
 	if (flags & MNT_ACLS)		res = catopt(res, "acls");
 	if (flags & MNT_NFS4ACLS)	res = catopt(res, "nfsv4acls");
 	if (flags & MNT_UNTRUSTED)	res = catopt(res, "untrusted");
+	if (flags & MNT_NOCOVER)	res = catopt(res, "nocover");
+	if (flags & MNT_EMPTYDIR)	res = catopt(res, "emptydir");
 
 	return (res);
 }

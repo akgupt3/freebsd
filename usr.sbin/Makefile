@@ -96,6 +96,7 @@ SUBDIR=	adduser \
 	trpt \
 	tzsetup \
 	ugidfw \
+	valectl \
 	vigr \
 	vipw \
 	wake \
@@ -108,7 +109,6 @@ SUBDIR=	adduser \
 
 SUBDIR.${MK_ACCT}+=	accton
 SUBDIR.${MK_ACCT}+=	sa
-SUBDIR.${MK_AMD}+=	amd
 SUBDIR.${MK_AUDIT}+=	audit
 SUBDIR.${MK_AUDIT}+=	auditd
 .if ${MK_OPENSSL} != "no"
@@ -124,6 +124,9 @@ SUBDIR.${MK_BLUETOOTH}+=	bluetooth
 SUBDIR.${MK_BOOTPARAMD}+=	bootparamd
 SUBDIR.${MK_BSDINSTALL}+=	bsdinstall
 SUBDIR.${MK_BSNMP}+=	bsnmpd
+.if ${MK_CAROOT} != "no"
+SUBDIR.${MK_OPENSSL}+=	certctl
+.endif
 SUBDIR.${MK_CXGBETOOL}+=	cxgbetool
 SUBDIR.${MK_DIALOG}+=	bsdconfig
 SUBDIR.${MK_EFI}+=	efivar efidp efibootmgr

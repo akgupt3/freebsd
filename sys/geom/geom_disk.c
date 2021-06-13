@@ -45,13 +45,12 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/sysctl.h>
 #include <sys/bio.h>
-#include <sys/bus.h>
 #include <sys/ctype.h>
+#include <sys/devctl.h>
 #include <sys/fcntl.h>
 #include <sys/malloc.h>
 #include <sys/sbuf.h>
 #include <sys/devicestat.h>
-#include <machine/md_var.h>
 
 #include <sys/lock.h>
 #include <sys/mutex.h>
@@ -64,13 +63,13 @@ __FBSDID("$FreeBSD$");
 #include <machine/bus.h>
 
 struct g_disk_softc {
-	struct mtx		 done_mtx;
 	struct disk		*dp;
+	struct devstat		*d_devstat;
 	struct sysctl_ctx_list	sysctl_ctx;
 	struct sysctl_oid	*sysctl_tree;
 	char			led[64];
 	uint32_t		state;
-	struct mtx		 start_mtx;
+	struct mtx		 done_mtx;
 };
 
 static g_access_t g_disk_access;
@@ -92,7 +91,7 @@ static struct g_class g_disk_class = {
 };
 
 SYSCTL_DECL(_kern_geom);
-static SYSCTL_NODE(_kern_geom, OID_AUTO, disk, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom, OID_AUTO, disk, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_DISK stuff");
 
 DECLARE_GEOM_CLASS(g_disk_class, g_disk);
@@ -108,7 +107,7 @@ g_disk_access(struct g_provider *pp, int r, int w, int e)
 	    pp->name, r, w, e);
 	g_topology_assert();
 	sc = pp->private;
-	if (sc == NULL || (dp = sc->dp) == NULL || dp->d_destroyed) {
+	if ((dp = sc->dp) == NULL || dp->d_destroyed) {
 		/*
 		 * Allow decreasing access count even if disk is not
 		 * available anymore.
@@ -232,15 +231,13 @@ g_disk_done(struct bio *bp)
 	struct g_disk_softc *sc;
 
 	/* See "notes" for why we need a mutex here */
-	/* XXX: will witness accept a mix of Giant/unGiant drivers here ? */
+	sc = bp->bio_caller1;
 	bp2 = bp->bio_parent;
-	sc = bp2->bio_to->private;
-	bp->bio_completed = bp->bio_length - bp->bio_resid;
 	binuptime(&now);
 	mtx_lock(&sc->done_mtx);
 	if (bp2->bio_error == 0)
 		bp2->bio_error = bp->bio_error;
-	bp2->bio_completed += bp->bio_completed;
+	bp2->bio_completed += bp->bio_length - bp->bio_resid;
 
 	switch (bp->bio_cmd) {
 	case BIO_ZONE:
@@ -250,7 +247,7 @@ g_disk_done(struct bio *bp)
 	case BIO_WRITE:
 	case BIO_DELETE:
 	case BIO_FLUSH:
-		devstat_end_transaction_bio_bt(sc->dp->d_devstat, bp, &now);
+		devstat_end_transaction_bio_bt(sc->d_devstat, bp, &now);
 		break;
 	default:
 		break;
@@ -270,15 +267,15 @@ g_disk_ioctl(struct g_provider *pp, u_long cmd, void * data, int fflag, struct t
 {
 	struct disk *dp;
 	struct g_disk_softc *sc;
-	int error;
 
 	sc = pp->private;
 	dp = sc->dp;
+	KASSERT(dp != NULL && !dp->d_destroyed,
+	    ("g_disk_ioctl(%lx) on destroyed disk %s", cmd, pp->name));
 
 	if (dp->d_ioctl == NULL)
 		return (ENOIOCTL);
-	error = dp->d_ioctl(dp, cmd, data, fflag, td);
-	return (error);
+	return (dp->d_ioctl(dp, cmd, data, fflag, td));
 }
 
 static off_t
@@ -432,10 +429,9 @@ g_disk_start(struct bio *bp)
 	biotrack(bp, __func__);
 
 	sc = bp->bio_to->private;
-	if (sc == NULL || (dp = sc->dp) == NULL || dp->d_destroyed) {
-		g_io_deliver(bp, ENXIO);
-		return;
-	}
+	dp = sc->dp;
+	KASSERT(dp != NULL && !dp->d_destroyed,
+	    ("g_disk_start(%p) on destroyed disk %s", bp, bp->bio_to->name));
 	error = EJUSTRETURN;
 	switch(bp->bio_cmd) {
 	case BIO_DELETE:
@@ -469,12 +465,11 @@ g_disk_start(struct bio *bp)
 					bp->bio_error = ENOMEM;
 			}
 			bp2->bio_done = g_disk_done;
+			bp2->bio_caller1 = sc;
 			bp2->bio_pblkno = bp2->bio_offset / dp->d_sectorsize;
 			bp2->bio_bcount = bp2->bio_length;
 			bp2->bio_disk = dp;
-			mtx_lock(&sc->start_mtx); 
 			devstat_start_transaction_bio(dp->d_devstat, bp2);
-			mtx_unlock(&sc->start_mtx); 
 			dp->d_strategy(bp2);
 
 			if (bp3 == NULL)
@@ -503,8 +498,6 @@ g_disk_start(struct bio *bp)
 			break;
 		else if (g_handleattr_int(bp, "GEOM::fwheads", dp->d_fwheads))
 			break;
-		else if (g_handleattr_off_t(bp, "GEOM::frontstuff", 0))
-			break;
 		else if (g_handleattr_str(bp, "GEOM::ident", dp->d_ident))
 			break;
 		else if (g_handleattr_str(bp, "GEOM::descr", dp->d_descr))
@@ -528,7 +521,10 @@ g_disk_start(struct bio *bp)
 		else if (g_handleattr_uint16_t(bp, "GEOM::rotation_rate",
 		    dp->d_rotation_rate))
 			break;
-		else 
+		else if (g_handleattr_str(bp, "GEOM::attachment",
+		    dp->d_attachment))
+			break;
+		else
 			error = ENOIOCTL;
 		break;
 	case BIO_FLUSH:
@@ -554,10 +550,20 @@ g_disk_start(struct bio *bp)
 			return;
 		}
 		bp2->bio_done = g_disk_done;
+		bp2->bio_caller1 = sc;
 		bp2->bio_disk = dp;
-		mtx_lock(&sc->start_mtx);
 		devstat_start_transaction_bio(dp->d_devstat, bp2);
-		mtx_unlock(&sc->start_mtx);
+		dp->d_strategy(bp2);
+		break;
+	case BIO_SPEEDUP:
+		bp2 = g_clone_bio(bp);
+		if (bp2 == NULL) {
+			g_io_deliver(bp, ENOMEM);
+			return;
+		}
+		bp2->bio_done = g_disk_done;
+		bp2->bio_caller1 = sc;
+		bp2->bio_disk = dp;
 		dp->d_strategy(bp2);
 		break;
 	default:
@@ -705,16 +711,14 @@ g_disk_create(void *arg, int flag)
 	mtx_pool_unlock(mtxpool_sleep, dp);
 
 	sc = g_malloc(sizeof(*sc), M_WAITOK | M_ZERO);
-	mtx_init(&sc->start_mtx, "g_disk_start", NULL, MTX_DEF);
 	mtx_init(&sc->done_mtx, "g_disk_done", NULL, MTX_DEF);
 	sc->dp = dp;
+	sc->d_devstat = dp->d_devstat;
 	gp = g_new_geomf(&g_disk_class, "%s%d", dp->d_name, dp->d_unit);
 	gp->softc = sc;
-	LIST_FOREACH(dap, &dp->d_aliases, da_next) {
-		snprintf(tmpstr, sizeof(tmpstr), "%s%d", dap->da_alias, dp->d_unit);
-		g_geom_add_alias(gp, tmpstr);
-	}
 	pp = g_new_providerf(gp, "%s", gp->name);
+	LIST_FOREACH(dap, &dp->d_aliases, da_next)
+		g_provider_add_alias(pp, "%s%d", dap->da_alias, dp->d_unit);
 	devstat_remove_entry(pp->stat);
 	pp->stat = NULL;
 	dp->d_devstat->id = pp;
@@ -733,7 +737,7 @@ g_disk_create(void *arg, int flag)
 	snprintf(tmpstr, sizeof(tmpstr), "GEOM disk %s", gp->name);
 	sc->sysctl_tree = SYSCTL_ADD_NODE(&sc->sysctl_ctx,
 		SYSCTL_STATIC_CHILDREN(_kern_geom_disk), OID_AUTO, gp->name,
-		CTLFLAG_RD, 0, tmpstr);
+		CTLFLAG_RD | CTLFLAG_MPSAFE, 0, tmpstr);
 	if (sc->sysctl_tree != NULL) {
 		SYSCTL_ADD_STRING(&sc->sysctl_ctx,
 		    SYSCTL_CHILDREN(sc->sysctl_tree), OID_AUTO, "led",
@@ -741,8 +745,8 @@ g_disk_create(void *arg, int flag)
 		    "LED name");
 		SYSCTL_ADD_PROC(&sc->sysctl_ctx,
 		    SYSCTL_CHILDREN(sc->sysctl_tree), OID_AUTO, "flags",
-		    CTLTYPE_STRING | CTLFLAG_RD, dp, 0, g_disk_sysctl_flags,
-		    "A", "Report disk flags");
+		    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT, dp, 0,
+		    g_disk_sysctl_flags, "A", "Report disk flags");
 	}
 	pp->private = sc;
 	dp->d_geom = gp;
@@ -791,7 +795,6 @@ g_disk_providergone(struct g_provider *pp)
 	pp->private = NULL;
 	pp->geom->softc = NULL;
 	mtx_destroy(&sc->done_mtx);
-	mtx_destroy(&sc->start_mtx);
 	g_free(sc);
 }
 
@@ -893,8 +896,9 @@ void
 disk_destroy(struct disk *dp)
 {
 
-	g_cancel_event(dp);
+	disk_gone(dp);
 	dp->d_destroyed = 1;
+	g_cancel_event(dp);
 	if (dp->d_devstat != NULL)
 		devstat_remove_entry(dp->d_devstat);
 	g_post_event(g_disk_destroy, dp, M_WAITOK, NULL);
@@ -919,6 +923,16 @@ disk_gone(struct disk *dp)
 	struct g_provider *pp;
 
 	mtx_pool_lock(mtxpool_sleep, dp);
+
+	/*
+	 * Second wither call makes no sense, plus we can not access the list
+	 * of providers without topology lock after calling wither once.
+	 */
+	if (dp->d_goneflag != 0) {
+		mtx_pool_unlock(mtxpool_sleep, dp);
+		return;
+	}
+
 	dp->d_goneflag = 1;
 
 	/*
@@ -943,13 +957,11 @@ disk_gone(struct disk *dp)
 	mtx_pool_unlock(mtxpool_sleep, dp);
 
 	gp = dp->d_geom;
-	if (gp != NULL) {
-		pp = LIST_FIRST(&gp->provider);
-		if (pp != NULL) {
-			KASSERT(LIST_NEXT(pp, provider) == NULL,
-			    ("geom %p has more than one provider", gp));
-			g_wither_provider(pp, ENXIO);
-		}
+	pp = LIST_FIRST(&gp->provider);
+	if (pp != NULL) {
+		KASSERT(LIST_NEXT(pp, provider) == NULL,
+		    ("geom %p has more than one provider", gp));
+		g_wither_provider(pp, ENXIO);
 	}
 }
 
@@ -1067,7 +1079,7 @@ sysctl_disks(SYSCTL_HANDLER_ARGS)
 	sbuf_delete(sb);
 	return error;
 }
- 
+
 SYSCTL_PROC(_kern, OID_AUTO, disks,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
     sysctl_disks, "A", "names of available disks");

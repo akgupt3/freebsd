@@ -25,7 +25,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd August 7, 2019
+.Dd August 26, 2020
 .Dt SBUF 9
 .Os
 .Sh NAME
@@ -65,7 +65,12 @@
 .Sh SYNOPSIS
 .In sys/types.h
 .In sys/sbuf.h
-.Ft typedef\ int ( sbuf_drain_func ) ( void\ *arg, const\ char\ *data, int\ len ) ;
+.Ft typedef int
+.Fo (sbuf_drain_func)
+.Fa "void *arg"
+.Fa "const char *data"
+.Fa "int len"
+.Fc
 .Pp
 .Ft struct sbuf *
 .Fo sbuf_new
@@ -365,9 +370,8 @@ function sets the
 .Fa sbuf Ns 's
 end position to
 .Fa pos ,
-which is a value between zero and one less than the size of the
-storage buffer.
-This effectively truncates the sbuf at the new position.
+which is a value between zero and the current position in the buffer.
+It can only truncate the sbuf to the new position.
 .Pp
 The
 .Fn sbuf_bcat

@@ -77,7 +77,6 @@ void	gv_rm_drive(struct gv_softc *, struct gv_drive *, int);
 void	gv_rm_plex(struct gv_softc *, struct gv_plex *);
 void	gv_rm_vol(struct gv_softc *, struct gv_volume *);
 
-
 /* geom_vinum_state.c */
 int	gv_sdstatemap(struct gv_plex *);
 void	gv_setstate(struct g_geom *, struct gctl_req *);
@@ -127,6 +126,7 @@ void	gv_post_event(struct gv_softc *, int, void *, void *, intmax_t,
 void	gv_worker_exit(struct gv_softc *);
 struct gv_event *gv_get_event(struct gv_softc *);
 void	gv_remove_event(struct gv_softc *, struct gv_event *);
+void	gv_drive_done(struct gv_drive *);
 void	gv_drive_tasted(struct gv_softc *, struct g_provider *);
 void	gv_drive_lost(struct gv_softc *, struct gv_drive *);
 void	gv_setup_objects(struct gv_softc *);
